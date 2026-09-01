@@ -1,4 +1,4 @@
-# 漫画翻译引擎（Manga Translate）
+# 网页漫画翻译引擎（Manga Translate）
 
 作者：百事比可口好喝
 
