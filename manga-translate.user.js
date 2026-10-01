@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         漫画翻译引擎 V6（修复网页版识别）
 // @namespace    https://github.com/yourname/manga-translate
-// @version      7.29.0
-// @description  提速版：全局并发池+OCR限速器 · 分块OCR并行 · 下载/OCR/翻译流水线 · 快重试+超时 · 纯白底气泡完全遮盖原文 · 气泡按像素紧贴原文框不再放大 · 去掉气泡描边 · 翻译引擎预设（混元/硅基流动/智谱GLM） · 拟声词跳过不翻 · 详细日志 · 合并更保守 · 英文强制重翻 · 处理顺序可选 · 手机极速模式 · 设备选择(自动/电脑/手机) · 手机直发原图 · 气泡底缩放 · 折叠面板 · 翻译回退可用版 · DeepSeek 全系关闭思考 · 面板默认最小化
+// @version      7.30.0
+// @description  提速版：全局并发池+OCR限速器 · 分块OCR并行 · 下载/OCR/翻译流水线 · 快重试+超时 · 纯白底气泡完全遮盖原文 · 气泡按像素紧贴原文框不再放大 · 去掉气泡描边 · 翻译引擎预设（混元/硅基流动/智谱GLM） · 拟声词跳过不翻 · 详细日志 · 合并更保守 · 英文强制重翻 · 处理顺序可选 · 手机极速模式 · 设备选择(自动/电脑/手机) · 手机直发原图 · 气泡底缩放 · 翻译回退可用版 · DeepSeek 全系关闭思考 · 面板默认最小化 · 分组默认全折叠
 // @author       百事比可口好喝
 // @match        *://*/*
 // @run-at       document-end
@@ -334,6 +334,10 @@
         document.body.appendChild(panel);
 
         // 折叠分区
+        function collapseAllSections() {
+            document.querySelectorAll('.mt-sec-b').forEach(b => { b.style.display = 'none'; });
+            document.querySelectorAll('.mt-sec-h .mt-arrow').forEach(a => { a.textContent = '▸'; });
+        }
         document.querySelectorAll('.mt-sec-h').forEach(h => {
             h.addEventListener('click', () => {
                 const b = $('mt-sec-' + h.dataset.target);
@@ -344,6 +348,8 @@
                 if (a) a.textContent = open ? '▾' : '▸';
             });
         });
+        // 默认全部折叠：只显示分组标题，需要哪个点哪个展开
+        collapseAllSections();
 
         $('mt-ai-url').value = apiConfig.aiUrl;
         $('mt-ai-model').value = apiConfig.aiModel;
@@ -451,6 +457,7 @@
             let tv = Math.max(0, Math.min(r.top, innerHeight - vh));
             panel.style.left = (lv / z) + 'px'; panel.style.top = (tv / z) + 'px';
             panel.style.bottom = 'auto'; panel.style.right = 'auto';
+            collapseAllSections();   // 每次点开都回到"全折叠"状态
             mini.style.display = 'none'; panel.style.display = 'flex';
         });
 
