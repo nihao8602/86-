@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         漫画翻译引擎 V6（修复网页版识别）
 // @namespace    https://github.com/yourname/manga-translate
-// @version      7.31.0
-// @description  提速版：全局并发池+OCR限速器 · 分块OCR并行 · 下载/OCR/翻译流水线 · 快重试+超时 · 纯白底气泡完全遮盖原文 · 气泡按像素紧贴原文框不再放大 · 去掉气泡描边 · 翻译引擎预设（混元/硅基流动/智谱GLM） · 拟声词跳过不翻 · 详细日志 · 合并更保守 · 英文强制重翻 · 处理顺序可选 · 手机极速模式 · 设备选择(自动/电脑/手机) · 手机直发原图 · 气泡底缩放 · 翻译回退可用版 · DeepSeek 全系关闭思考 · 面板默认最小化 · 分组默认全折叠 · 面板支持触屏拖动
+// @version      7.32.0
+// @description  提速版：全局并发池+OCR限速器 · 分块OCR并行 · 下载/OCR/翻译流水线 · 快重试+超时 · 纯白底气泡完全遮盖原文 · 气泡按像素紧贴原文框不再放大 · 去掉气泡描边 · 翻译引擎预设（混元/硅基流动/智谱GLM） · 拟声词跳过不翻 · 详细日志 · 合并更保守 · 英文强制重翻 · 处理顺序可选 · 手机极速模式 · 设备选择(自动/电脑/手机) · 手机直发原图 · 气泡底缩放 · 翻译回退可用版 · DeepSeek 全系关闭思考 · 面板默认最小化 · 分组默认全折叠 · 面板支持触屏拖动 · 气泡擦除原文(跟随渐变)
 // @author       百事比可口好喝
 // @match        *://*/*
 // @run-at       document-end
@@ -34,7 +34,8 @@
         panelZoom: savedConfig.panelZoom || '100',
         fastMode: savedConfig.fastMode === undefined ? false : !!savedConfig.fastMode,
         deviceMode: savedConfig.deviceMode || 'auto',
-        bubbleScale: savedConfig.bubbleScale || '100'
+        bubbleScale: savedConfig.bubbleScale || '100',
+        eraseText: savedConfig.eraseText === undefined ? true : !!savedConfig.eraseText
     };
     const OCR_MODES = ['baidu', 'baidu-direct', 'ocrspace', 'local'];
     if (!OCR_MODES.includes(apiConfig.ocrMode)) apiConfig.ocrMode = 'baidu';
@@ -308,6 +309,10 @@
                     <span style="font-size:12px;font-weight:700;white-space:nowrap;">气泡缩放 <span id="mt-bubble-scale-val" style="color:#FF69B4;">100%</span></span>
                     <input id="mt-bubble-scale" type="range" min="50" max="150" value="100" style="flex:1;accent-color:#FF69B4;">
                 </div>
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#aaa;padding:2px 0;cursor:pointer;">
+                    <input id="mt-erase-text" type="checkbox" style="accent-color:#FF69B4;">
+                    擦除原文（用气泡底色填掉原文再打译文）
+                </label>
                 <div style="display:flex;align-items:center;gap:8px;background:#333;padding:6px 8px;border-radius:6px;border:1px solid #555;">
                     <span style="font-size:12px;font-weight:700;white-space:nowrap;">面板缩放 <span id="mt-zoom-val" style="color:#FF69B4;">100%</span></span>
                     <input id="mt-panel-zoom" type="range" min="70" max="160" value="100" style="flex:1;accent-color:#FF69B4;">
@@ -359,6 +364,7 @@
         $('mt-font-val').innerText = apiConfig.fontSize;
         $('mt-bubble-scale').value = apiConfig.bubbleScale || '100';
         $('mt-bubble-scale-val').innerText = (apiConfig.bubbleScale || '100') + '%';
+        $('mt-erase-text').checked = apiConfig.eraseText !== false;
         $('mt-panel-zoom').value = apiConfig.panelZoom || '100';
         $('mt-zoom-val').innerText = (apiConfig.panelZoom || '100') + '%';
         panel.style.zoom = (parseInt(apiConfig.panelZoom || '100', 10) / 100);
@@ -540,6 +546,7 @@
         apiConfig.fastMode = !!$('mt-fast-mode').checked;
         apiConfig.deviceMode = $('mt-device-mode').value || 'auto';
         apiConfig.bubbleScale = $('mt-bubble-scale').value || '100';
+        apiConfig.eraseText = !!$('mt-erase-text').checked;
     }
 
     function makeDraggable(panel) {
@@ -932,7 +939,76 @@
         });
         // 跳过拟声词（重复字符型特效字）：识别不准，直接不翻不盖
         const kept = merged.filter(b => !isSfx(b.originalText));
+        // A2 文字擦除：趁 bitmap 还在，为每块生成"擦掉原文"的底图（跟随渐变），存到块上给气泡当背景
+        if (apiConfig.eraseText) {
+            kept.forEach(b => {
+                try {
+                    const ec = eraseTextRegion(bitmap, b.x, b.y, b.w, b.h);
+                    if (ec) b._eraseBg = ec.toDataURL('image/png');
+                } catch (e) { }
+            });
+        }
         return { blocks: kept, width: W, height: H };
+    }
+
+    // A2 文字擦除：把框内"偏离背景色"的文字笔画，用最近的背景像素颜色填掉（局部取色 → 能跟随渐变）
+    function eraseTextRegion(bitmap, x, y, w, h) {
+        try {
+            const sx = Math.max(0, Math.floor(x));
+            const sy = Math.max(0, Math.floor(y));
+            const sw = Math.max(3, Math.min(Math.ceil(w), (bitmap.width || 0) - sx));
+            const sh = Math.max(3, Math.min(Math.ceil(h), (bitmap.height || 0) - sy));
+            if (sw < 3 || sh < 3) return null;
+            const c = document.createElement('canvas');
+            c.width = sw; c.height = sh;
+            const ctx = c.getContext('2d', { willReadFrequently: true });
+            ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+            const imgData = ctx.getImageData(0, 0, sw, sh);
+            const d = imgData.data;
+
+            // 1) 背景参考色：取四条边的像素中位数（文字一般不贴边）
+            const rs = [], gs = [], bs = [];
+            const pushPx = (px) => { const i = px << 2; rs.push(d[i]); gs.push(d[i + 1]); bs.push(d[i + 2]); };
+            for (let i = 0; i < sw; i++) { pushPx(i); pushPx((sh - 1) * sw + i); }
+            for (let j = 0; j < sh; j++) { pushPx(j * sw); pushPx(j * sw + sw - 1); }
+            const med = (arr) => { arr.sort((a, b) => a - b); return arr[arr.length >> 1]; };
+            const bgR = med(rs), bgG = med(gs), bgB = med(bs);
+
+            // 2) 标记文字像素：与背景参考色差异过大
+            const TH = 72, TH2 = TH * TH;
+            const N = sw * sh;
+            const isText = new Uint8Array(N);
+            for (let p = 0, i = 0; p < N; p++, i += 4) {
+                const dr = d[i] - bgR, dg = d[i + 1] - bgG, db = d[i + 2] - bgB;
+                if (dr * dr + dg * dg + db * db > TH2) isText[p] = 1;
+            }
+
+            // 3) 每个文字像素：从原图找最近的非文字像素取色填充（左右上下四向，最多 16px）
+            const src = new Uint8ClampedArray(d);
+            const MAXR = 16;
+            for (let yy = 0; yy < sh; yy++) {
+                const rowBase = yy * sw;
+                for (let xx = 0; xx < sw; xx++) {
+                    const p = rowBase + xx;
+                    if (!isText[p]) continue;
+                    let fr = bgR, fg = bgG, fb = bgB, found = false;
+                    for (let r = 1; r <= MAXR && !found; r++) {
+                        let sr = 0, sg = 0, sb = 0, n = 0, q, qi;
+                        if (xx - r >= 0) { q = p - r; if (!isText[q]) { qi = q << 2; sr += src[qi]; sg += src[qi + 1]; sb += src[qi + 2]; n++; } }
+                        if (xx + r < sw) { q = p + r; if (!isText[q]) { qi = q << 2; sr += src[qi]; sg += src[qi + 1]; sb += src[qi + 2]; n++; } }
+                        if (yy - r >= 0) { q = (yy - r) * sw + xx; if (!isText[q]) { qi = q << 2; sr += src[qi]; sg += src[qi + 1]; sb += src[qi + 2]; n++; } }
+                        if (yy + r < sh) { q = (yy + r) * sw + xx; if (!isText[q]) { qi = q << 2; sr += src[qi]; sg += src[qi + 1]; sb += src[qi + 2]; n++; } }
+                        if (n) { fr = sr / n; fg = sg / n; fb = sb / n; found = true; }
+                    }
+                    const i = p << 2;
+                    d[i] = fr; d[i + 1] = fg; d[i + 2] = fb;
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+            return c;
+        } catch (e) {
+            return null;
+        }
     }
 
     function mergeBlocks(blocks) {
@@ -1403,9 +1479,12 @@
             const L = Math.max(0, Math.round(cx - W / 2));
             const T = Math.max(0, Math.round(cy - minH / 2));
             W = Math.max(1, Math.min(W, dispW - L));
-            // 纯白底 + 居中译文：框体紧贴原文框，彻底遮住原文
+            // 擦除底图（A2）优先，否则纯白底；居中译文
+            const bgCss = b._eraseBg
+                ? ('background-image:url(' + b._eraseBg + ');background-size:100% 100%;background-repeat:no-repeat;')
+                : 'background:#ffffff;';
             div.style.cssText = 'position:absolute;left:' + L + 'px;top:' + T + 'px;width:' + W + 'px;min-height:' + minH + 'px;max-height:' + maxH + 'px;'
-                + 'background:#ffffff;color:#000;'
+                + bgCss + 'color:#000;'
                 + 'border:none;border-radius:4px;padding:2px 3px;'
                 + 'font-family:-apple-system,BlinkMacSystemFont,"Microsoft YaHei","PingFang SC",sans-serif;'
                 + 'font-size:' + apiConfig.fontSize + 'px;font-weight:700;text-align:center;line-height:1.15;'
