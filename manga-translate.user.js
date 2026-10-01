@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         漫画翻译引擎 V6（修复网页版识别）
 // @namespace    https://github.com/yourname/manga-translate
-// @version      7.30.0
-// @description  提速版：全局并发池+OCR限速器 · 分块OCR并行 · 下载/OCR/翻译流水线 · 快重试+超时 · 纯白底气泡完全遮盖原文 · 气泡按像素紧贴原文框不再放大 · 去掉气泡描边 · 翻译引擎预设（混元/硅基流动/智谱GLM） · 拟声词跳过不翻 · 详细日志 · 合并更保守 · 英文强制重翻 · 处理顺序可选 · 手机极速模式 · 设备选择(自动/电脑/手机) · 手机直发原图 · 气泡底缩放 · 翻译回退可用版 · DeepSeek 全系关闭思考 · 面板默认最小化 · 分组默认全折叠
+// @version      7.31.0
+// @description  提速版：全局并发池+OCR限速器 · 分块OCR并行 · 下载/OCR/翻译流水线 · 快重试+超时 · 纯白底气泡完全遮盖原文 · 气泡按像素紧贴原文框不再放大 · 去掉气泡描边 · 翻译引擎预设（混元/硅基流动/智谱GLM） · 拟声词跳过不翻 · 详细日志 · 合并更保守 · 英文强制重翻 · 处理顺序可选 · 手机极速模式 · 设备选择(自动/电脑/手机) · 手机直发原图 · 气泡底缩放 · 翻译回退可用版 · DeepSeek 全系关闭思考 · 面板默认最小化 · 分组默认全折叠 · 面板支持触屏拖动
 // @author       百事比可口好喝
 // @match        *://*/*
 // @run-at       document-end
@@ -545,22 +545,38 @@
     function makeDraggable(panel) {
         let dragging = false, sx = 0, sy = 0, sl = 0, st = 0, vw = 0, vh = 0;
         const pz = () => parseFloat(panel.style.zoom) || 1;
-        panel.addEventListener('mousedown', e => {
-            if (e.target && e.target.closest && e.target.closest('input,select,button,textarea')) return;
-            dragging = true; sx = e.clientX; sy = e.clientY;
+        function dragStart(cx, cy, target) {
+            if (target && target.closest && target.closest('input,select,button,textarea')) return;
+            dragging = true; sx = cx; sy = cy;
             const r = panel.getBoundingClientRect();
             sl = r.left; st = r.top; vw = r.width; vh = r.height;
-            e.preventDefault();
-        });
-        document.addEventListener('mousemove', e => {
+        }
+        function dragMove(cx, cy) {
             if (!dragging) return;
             const z = pz();
-            let lv = Math.max(0, Math.min(sl + (e.clientX - sx), innerWidth - vw));
-            let tv = Math.max(0, Math.min(st + (e.clientY - sy), innerHeight - vh));
+            let lv = Math.max(0, Math.min(sl + (cx - sx), innerWidth - vw));
+            let tv = Math.max(0, Math.min(st + (cy - sy), innerHeight - vh));
             panel.style.left = (lv / z) + 'px'; panel.style.top = (tv / z) + 'px';
             panel.style.right = 'auto'; panel.style.bottom = 'auto';
+        }
+        // 鼠标拖动
+        panel.addEventListener('mousedown', e => {
+            dragStart(e.clientX, e.clientY, e.target);
+            if (dragging) e.preventDefault();
         });
+        document.addEventListener('mousemove', e => dragMove(e.clientX, e.clientY));
         document.addEventListener('mouseup', () => dragging = false);
+        // 触屏拖动（手机）：面板也要能拖，别只有悬浮球能拖
+        panel.addEventListener('touchstart', e => {
+            if (e.touches && e.touches[0]) dragStart(e.touches[0].clientX, e.touches[0].clientY, e.target);
+        }, { passive: true });
+        document.addEventListener('touchmove', e => {
+            if (!dragging || !e.touches || !e.touches[0]) return;
+            e.preventDefault();
+            dragMove(e.touches[0].clientX, e.touches[0].clientY);
+        }, { passive: false });
+        document.addEventListener('touchend', () => dragging = false);
+        document.addEventListener('touchcancel', () => dragging = false);
     }
 
     /* ---------------- 主流程：流水线（下载→OCR→翻译 重叠进行） ---------------- */
