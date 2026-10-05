@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         漫画翻译引擎 V6（修复网页版识别）
 // @namespace    https://github.com/yourname/manga-translate
-// @version      7.34.0
-// @description  提速版：全局并发池+OCR限速器 · 分块OCR并行 · 下载/OCR/翻译流水线 · 快重试+超时 · 纯白底气泡完全遮盖原文 · 气泡按像素紧贴原文框不再放大 · 去掉气泡描边 · 翻译引擎预设（混元/硅基流动/智谱GLM） · 拟声词跳过不翻 · 详细日志 · 合并更保守 · 英文强制重翻 · 处理顺序可选 · 手机极速模式 · 设备选择(自动/电脑/手机) · 手机直发原图 · 气泡底缩放 · 翻译回退可用版 · DeepSeek 全系关闭思考 · 面板默认最小化 · 分组默认全折叠 · 面板支持触屏拖动 ·（已移除气泡擦除功能）
+// @version      7.35.0
+// @description  提速版：全局并发池+OCR限速器 · 分块OCR并行 · 下载/OCR/翻译流水线 · 快重试+超时 · 纯白底气泡完全遮盖原文 · 气泡按像素紧贴原文框不再放大 · 去掉气泡描边 · 翻译引擎预设（混元/硅基流动/智谱GLM） · 拟声词跳过不翻 · 详细日志 · 合并更保守 · 英文强制重翻 · 处理顺序可选 · 手机极速模式 · 设备选择(自动/电脑/手机) · 手机直发原图 · 气泡底缩放 · 翻译回退可用版 · DeepSeek 全系关闭思考 · 面板默认最小化 · 分组默认全折叠 · 面板支持触屏拖动 · 各服务商分别保存密钥
 // @author       百事比可口好喝
 // @match        *://*/*
 // @run-at       document-end
@@ -18,6 +18,7 @@
     const apiConfig = {
         aiUrl: savedConfig.aiUrl || 'https://api.deepseek.com/chat/completions',
         aiKey: savedConfig.aiKey || '',
+        aiKeys: savedConfig.aiKeys || {},   // 按接口地址分别保存密钥，切换服务商不用重输
         aiModel: savedConfig.aiModel || 'deepseek-chat',
         sourceLang: savedConfig.sourceLang || 'kor',
         fontSize: savedConfig.fontSize || '14',
@@ -353,7 +354,7 @@
 
         $('mt-ai-url').value = apiConfig.aiUrl;
         $('mt-ai-model').value = apiConfig.aiModel;
-        $('mt-ai-key').value = apiConfig.aiKey;
+        $('mt-ai-key').value = keyForUrl(apiConfig.aiUrl) || apiConfig.aiKey;
         $('mt-source-lang').value = apiConfig.sourceLang;
         $('mt-font-size').value = apiConfig.fontSize;
         $('mt-font-val').innerText = apiConfig.fontSize;
@@ -375,14 +376,24 @@
         $('mt-ocr-rps').value = apiConfig.ocrRps;
         $('mt-local-url').value = apiConfig.localOcrUrl;
 
-        // 翻译引擎预设：选好后自动填接口地址+模型，API Key 仍手动填
+        // 每个接口地址各自存一份密钥：切换服务商自动回填，不用重输
+        function keyForUrl(url) {
+            const k = String(url || '').trim().toLowerCase();
+            return (apiConfig.aiKeys && apiConfig.aiKeys[k]) || '';
+        }
+        // 翻译引擎预设：选好后自动填接口地址+模型，并回填该服务商保存的密钥
         const translatorSel = $('mt-translator');
         translatorSel.addEventListener('change', () => {
             const t = TRANSLATORS[translatorSel.value];
             if (t && t.url) {
                 $('mt-ai-url').value = t.url;
                 $('mt-ai-model').value = t.model;
+                $('mt-ai-key').value = keyForUrl(t.url);
             }
+        });
+        // 手动改接口地址时，也回填该地址保存过的密钥
+        $('mt-ai-url').addEventListener('change', () => {
+            $('mt-ai-key').value = keyForUrl($('mt-ai-url').value);
         });
         (function restoreTranslator() {
             const url = apiConfig.aiUrl;
@@ -523,6 +534,10 @@
         apiConfig.aiUrl = $('mt-ai-url').value.trim() || 'https://api.deepseek.com/chat/completions';
         apiConfig.aiModel = $('mt-ai-model').value.trim() || 'deepseek-chat';
         apiConfig.aiKey = $('mt-ai-key').value.trim();
+        // 按接口地址分别存一份密钥，方便切换服务商
+        if (!apiConfig.aiKeys) apiConfig.aiKeys = {};
+        const _keyUrl = (apiConfig.aiUrl || '').trim().toLowerCase();
+        if (_keyUrl && apiConfig.aiKey) apiConfig.aiKeys[_keyUrl] = apiConfig.aiKey;
         apiConfig.sourceLang = $('mt-source-lang').value;
         apiConfig.fontSize = $('mt-font-size').value;
         apiConfig.ocrMode = $('mt-ocr-mode').value;
