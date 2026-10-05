@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         漫画翻译引擎
 // @namespace    https://github.com/yourname/manga-translate
-// @version      7.36.0
+// @version      7.37.0
 // @description  提速版：全局并发池+OCR限速器 · 分块OCR并行 · 下载/OCR/翻译流水线 · 快重试+超时 · 纯白底气泡完全遮盖原文 · 气泡按像素紧贴原文框不再放大 · 去掉气泡描边 · 翻译引擎预设（混元/硅基流动/智谱GLM） · 拟声词跳过不翻 · 详细日志 · 合并更保守 · 英文强制重翻 · 处理顺序可选 · 手机极速模式 · 设备选择(自动/电脑/手机) · 手机直发原图 · 气泡底缩放 · 翻译回退可用版 · DeepSeek 全系关闭思考 · 面板默认最小化 · 分组默认全折叠 · 面板支持触屏拖动 · 各服务商分别保存密钥
 // @author       百事比可口好喝
 // @match        *://*/*
@@ -200,7 +200,7 @@
         panel.style.cssText = 'position:fixed;bottom:40px;right:20px;z-index:999999;width:300px;background:rgba(28,28,30,0.96);color:#fff;padding:14px;border-radius:14px;font-family:system-ui,sans-serif;font-size:13px;box-shadow:0 8px 28px rgba(0,0,0,0.45);display:flex;flex-direction:column;gap:10px;backdrop-filter:blur(6px);';
         panel.innerHTML = `
             <div id="mt-header" style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #444;padding-bottom:6px;cursor:move;user-select:none;">
-                <span style="font-weight:700;color:#FF69B4;">漫画翻译引擎 V7（极速）</span>
+                <span style="font-weight:700;color:#FF69B4;">漫画翻译引擎</span>
                 <span id="mt-minimize" style="cursor:pointer;color:#aaa;font-size:16px;padding:0 5px;">—</span>
             </div>
 
