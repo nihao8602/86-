@@ -35,7 +35,46 @@ manga-translate/
 └── baidu-ocr-proxy.js        #（可选）百度 OCR Cloudflare 代理
 ```
 
+## 环境要求（安装前先对号入座）
+
+一键脚本会自动帮你装 Python 和 PaddleOCR，但**系统本身**要满足下面的底线：
+
+| | Windows 版（`install.cmd` / `install.ps1`） | 手机版（`install-termux.sh`） | Linux 版（同一份 `.sh`） |
+|---|---|---|---|
+| 系统 | Windows 10 / 11 **64 位** | Android 7 及以上 | Ubuntu 20.04+ / Debian 11+（glibc） |
+| 运行环境 | PowerShell 5.1（系统自带） | **Termux**（建议从 [F-Droid](https://f-droid.org/packages/com.termux/) 装，应用商店里的版本太旧） | bash + curl |
+| 需要预装 Python 吗 | ❌ 不用（脚本自动装 3.12.10） | ❌ 不用（容器内 apt 安装） | ✅ 需要 Python **3.10+** 和 `python3-venv` |
+| 需要 root / 管理员吗 | ❌ 不需要（只有放行防火墙那步会弹一次 UAC，可跳过） | ❌ **不需要 root**（走 Termux + proot 容器） | 装 venv 时可能需要 sudo |
+| CPU 架构 | x64 | **ARM64 / aarch64** | x86_64 或 aarch64 |
+| 可用磁盘 | ≥ 4GB（建议 6GB） | ≥ 4GB（装完约 2.5-3GB） | 同左 |
+| 内存 | 无特殊要求 | 建议 4GB 以上（PaddleOCR 常驻几百 MB） | 无特殊要求 |
+
+**三套都要的共同前提**
+
+1. **网络**：能访问 `raw.githubusercontent.com`（拿脚本）和 `pypi.tuna.tsinghua.edu.cn`（拿依赖）。
+   国内直连 GitHub 经常失败 —— 请挂代理，或先手动下载脚本文件再本地运行。
+2. **Tampermonkey**：浏览器/手机上装油猴插件（真正开始翻译时才需要，只装 OCR 服务不需要）。
+3. **一个翻译 API Key**：例如 DeepSeek。**不需要**本地大模型，翻译是走云端接口的。
+
+**前提不满足怎么办（每条都有退路，别卡在这儿）**
+
+| 卡住的地方 | 退路 |
+|---|---|
+| 连不上 GitHub raw | 手动下载 `install.cmd` / `install.ps1` / `install-termux.sh`，再本地运行 |
+| 不想装任何环境 / 手机太旧 | **完全不用本地 OCR**：只装油猴脚本，面板里 OCR 模式改成「百度」或 `ocr.space`，填对应 Key 即可 |
+| 手机性能弱 | 手机只当显示端：OCR 地址填**电脑**的局域网地址（`http://电脑IP:8000/ocr`），识别在电脑上跑 |
+| 不想花钱买 API | 面板里翻译引擎可选「本地 Ollama」（免费离线，需自己装 Ollama），或先用有免费额度的服务商（腾讯混元 / 硅基流动 / 智谱 GLM） |
+
 ## 安装
+
+### 先选一条路
+
+| 你的情况 | 走这条 |
+|---|---|
+| Windows 电脑，想最省事 | **方式 A**：下载 `install.cmd` 双击运行 |
+| 安卓手机（装了 Termux，或已有 proot / chroot 的 Linux 容器） | **方式 C**：Termux 里跑一行命令 |
+| 只想用云端 OCR，什么都不想装 | 跳过本节，直接看「2. 用户脚本」，面板里 OCR 模式选「百度」或 `ocr.space` |
+| 手机只当显示端（识别交给电脑） | 电脑装**方式 A**，手机 OCR 地址填电脑的局域网地址 |
 
 ### 1. 本地 OCR 服务端
 
@@ -47,8 +86,8 @@ manga-translate/
 用法（三种任选，效果一样）：
 
 1. 下载本仓库的 `install.cmd`，**双击运行**（推荐，最省事）
-2. 或打开 PowerShell，粘贴这一行回车（自动下载部署脚本再执行）：
-3. 或下载 `install.ps1` 后直接跑：`powershell -ExecutionPolicy Bypass -File .\install.ps1`
+2. 或下载 `install.ps1` 后直接跑：`powershell -ExecutionPolicy Bypass -File .\install.ps1`
+3. 或打开 PowerShell，粘贴这一行回车（自动下载 install.cmd 再执行）：
 
 ```powershell
 irm https://raw.githubusercontent.com/nihao8602/86-/main/install.cmd -OutFile "$env:TEMP\manga-install.cmd"; & "$env:TEMP\manga-install.cmd"
