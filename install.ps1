@@ -78,6 +78,30 @@ function Die {
 }
 
 # ---------- 工具函数 ----------
+# 调用外部程序必须用下面两个包装：PowerShell 5.1 在 $ErrorActionPreference='Stop' 下，
+# 原生命令只要往 stderr 写一个字，就会被当成 NativeCommandError 终止整个脚本
+# （python 的一句 traceback、pip 的一条 warning 都足以打断部署）。
+function Invoke-ExeQuiet {
+    # 捕获输出（stdout + stderr 合并）后返回文本，不打印
+    param([string]$Exe, [string[]]$ExeArgs = @())
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $o = & $Exe @ExeArgs 2>&1
+        return (($o | ForEach-Object { "$_" }) -join "`n")
+    } finally { $ErrorActionPreference = $old }
+}
+function Invoke-ExeLive {
+    # 不捕获输出：pip 的进度实时显示在控制台，只返回退出码
+    param([string]$Exe, [string[]]$ExeArgs = @())
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Exe @ExeArgs
+        return $LASTEXITCODE
+    } finally { $ErrorActionPreference = $old }
+}
+
 function Test-Admin {
     try {
         $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -130,8 +154,8 @@ function Get-Python312 {
     foreach ($c in $cands) {
         try {
             if (-not (Test-Path $c)) { continue }
-            $v = & $c -c "import sys; print('%d.%d.%d' % sys.version_info[:3])" 2>$null
-            if ($v -and $v.Trim() -like '3.12.*') { return $c }
+            $v = Invoke-ExeQuiet -Exe $c -ExeArgs @('-c', "import sys; print('%d.%d.%d' % sys.version_info[:3])")
+            if ($v -match '\b3\.12\.\d+\b') { return $c }
         } catch { }
     }
     return $null
@@ -194,7 +218,7 @@ if ($Uninstall) {
         if (Test-Path $InstallDir) { Warn "目录删除不完整，请手动删除：$InstallDir" } else { Ok "已删除目录：$InstallDir" }
     } else { Ok '安装目录本来就不存在' }
     try {
-        $out = & netsh advfirewall firewall delete rule name="$RuleName" 2>&1
+        $out = Invoke-ExeQuiet -Exe 'netsh' -ExeArgs @('advfirewall', 'firewall', 'delete', 'rule', "name=$RuleName")
         Ok '已删除防火墙规则'
     } catch { Warn '删除防火墙规则失败（可能本来就没有，或需要管理员权限）' }
     Say ''
@@ -289,7 +313,7 @@ if (Test-Path $venvPy) {
     Say "    [DryRun] 执行： `"$pyExe`" -m venv `"$venvDir`"" 'DarkGray'
 } else {
     if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
-    & $pyExe -m venv $venvDir
+    [void](Invoke-ExeLive -Exe $pyExe -ExeArgs @('-m', 'venv', $venvDir))
     if (-not (Test-Path $venvPy)) { Die "创建虚拟环境失败：$venvDir" }
     Ok "虚拟环境已创建：$venvDir"
 }
@@ -301,8 +325,8 @@ Step 4 '安装 PaddleOCR 依赖（约 600MB，请耐心等待）'
 $constraints = Join-Path $InstallDir 'constraints.txt'
 $needInstall = $true
 if (Test-Path $venvPy) {
-    $cur = & $venvPy -c "import paddleocr, paddle, numpy; print('MANGA_OK')" 2>$null
-    if ($cur -and ($cur -join '') -like '*MANGA_OK*') { $needInstall = $false }
+    $cur = Invoke-ExeQuiet -Exe $venvPy -ExeArgs @('-c', "import paddleocr, paddle, numpy; print('MANGA_OK')")
+    if ($cur -like '*MANGA_OK*') { $needInstall = $false }
 }
 if (-not $needInstall) {
     Ok '依赖已装好，跳过'
@@ -317,9 +341,9 @@ if (-not $needInstall) {
     foreach ($idx in $PipIndexes) {
         try {
             Say "    pip 源：$idx" 'DarkGray'
-            & $venvPy -m pip install --upgrade pip --no-warn-script-location -i $idx --quiet
-            & $venvPy -m pip install -c $constraints --no-warn-script-location $Packages -i $idx
-            if ($LASTEXITCODE -ne 0) { throw "pip 返回代码 $LASTEXITCODE" }
+            [void](Invoke-ExeLive -Exe $venvPy -ExeArgs @('-m', 'pip', 'install', '--upgrade', 'pip', '--no-warn-script-location', '-i', $idx, '--quiet'))
+            $rc = Invoke-ExeLive -Exe $venvPy -ExeArgs (@('-m', 'pip', 'install', '-c', $constraints, '--no-warn-script-location', '-i', $idx) + $Packages)
+            if ($rc -ne 0) { throw "pip 返回代码 $rc" }
             $installed = $true
             break
         } catch {
@@ -335,7 +359,7 @@ if (-not $needInstall) {
 # 复核版本（装错版本一定会崩，这里提前拦住）
 if (-not $DryRun) {
     if (-not (Test-Path $venvPy)) { Die "虚拟环境异常：$venvPy 不存在" }
-    $verLine = (& $venvPy -c "import numpy, paddle, cv2, paddleocr, fastapi, uvicorn; print('MANGA_VER', numpy.__version__, paddle.__version__, paddleocr.__version__)" 2>&1) -join ' '
+    $verLine = Invoke-ExeQuiet -Exe $venvPy -ExeArgs @('-c', "import numpy, paddle, cv2, paddleocr, fastapi, uvicorn; print('MANGA_VER', numpy.__version__, paddle.__version__, paddleocr.__version__)")
     if ($verLine -notlike '*MANGA_VER*') {
         Die "依赖导入失败：$verLine"
     }
@@ -345,8 +369,8 @@ if (-not $DryRun) {
         Ok "numpy=$npVer  paddlepaddle=$($m.Groups[2].Value)  paddleocr=$($m.Groups[3].Value)"
         if ([version]$npVer -ge [version]'2.0.0') {
             Warn 'numpy 被升级到了 2.x，正在降回 1.26.4 ...'
-            & $venvPy -m pip install $ReqNumpy --no-warn-script-location -i $PipIndexes[0]
-            if ($LASTEXITCODE -ne 0) { Die 'numpy 降级失败。请手动执行：venv\Scripts\python.exe -m pip install "numpy==1.26.4"' }
+            $rc = Invoke-ExeLive -Exe $venvPy -ExeArgs @('-m', 'pip', 'install', $ReqNumpy, '--no-warn-script-location', '-i', $PipIndexes[0])
+            if ($rc -ne 0) { Die 'numpy 降级失败。请手动执行：venv\Scripts\python.exe -m pip install "numpy==1.26.4"' }
             Ok 'numpy 已固定为 1.26.4'
         }
     } else {
@@ -442,8 +466,8 @@ if ($SkipFirewall) {
     Say "    [DryRun] 添加防火墙入站规则「$RuleName」放行 TCP $Port" 'DarkGray'
 } else {
     try {
-        $exists = & netsh advfirewall firewall show rule name="$RuleName" 2>&1
-        if ($LASTEXITCODE -eq 0 -and ($exists -join '') -match $RuleName) {
+        $exists = Invoke-ExeQuiet -Exe 'netsh' -ExeArgs @('advfirewall', 'firewall', 'show', 'rule', "name=$RuleName")
+        if ($exists -match [regex]::Escape($RuleName)) {
             Ok '防火墙规则已存在，跳过'
             $fwDone = $true
         }
@@ -453,8 +477,8 @@ if ($SkipFirewall) {
             'dir=in', 'action=allow', 'protocol=TCP', "localport=$Port")
         try {
             if (Test-Admin) {
-                & netsh @fwArgs | Out-Null
-                if ($LASTEXITCODE -eq 0) { Ok "已放行 TCP $Port"; $fwDone = $true }
+                $rc = Invoke-ExeLive -Exe 'netsh' -ExeArgs $fwArgs
+                if ($rc -eq 0) { Ok "已放行 TCP $Port"; $fwDone = $true }
             } else {
                 Say '    需要管理员权限，正在弹出 UAC 确认框（点「是」即可）...' 'DarkGray'
                 $p = Start-Process -FilePath 'netsh' -ArgumentList $fwArgs -Verb RunAs -Wait -PassThru -ErrorAction Stop
