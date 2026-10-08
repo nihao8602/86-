@@ -3,3 +3,5 @@
 *.cmd -text
 *.bat -text
 *.ps1 -text
+# bash 脚本必须 LF（且不能带 BOM，否则 shebang 失效），同样按原样存储
+*.sh -text

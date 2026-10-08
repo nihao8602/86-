@@ -27,7 +27,8 @@
 manga-translate/
 ├── manga-translate.user.js   # Tampermonkey 用户脚本（主程序）
 ├── install.cmd               # Windows 一键部署入口（双击即可装好本地 OCR）
-├── install.ps1               # 一键部署主脚本（install.cmd 会调用它）
+├── install.ps1               # Windows 一键部署主脚本（install.cmd 会调用它）
+├── install-termux.sh         # 手机（Android/Termux）与 Linux 一键部署脚本
 ├── local-ocr-server.py       # 本地 OCR 服务（PaddleOCR，监听 0.0.0.0:8000）
 ├── restart-ocr.bat           # 一键重启 OCR 服务（含防火墙放行 8000）
 ├── setup-ollama-lan.bat      #（可选）让 Ollama 局域网可访问
@@ -77,6 +78,29 @@ python local-ocr-server.py
 > ⚠️ 版本必须配套：PaddleOCR 2.x + PaddlePaddle **2.6.2** + **numpy 1.x**。
 > 装 PaddlePaddle 3.x、或让 numpy 升到 2.x 都会崩；Python 必须是 3.12（3.13 没有 PaddlePaddle 2.6.2 的安装包）。
 > Windows 下也可直接双击 `restart-ocr.bat`（首次建议「以管理员身份运行」以添加防火墙规则）。
+
+#### 方式 C：装在手机上（Android / Termux，进阶）
+
+手机（尤其是有 root 的机器）也能跑这份 OCR 服务，思路和 Linux 一样：**先有一个 glibc 的 Ubuntu 环境**
+（Termux + proot-distro，或你自己的 chroot/proot 容器），再在里面装 PaddleOCR。
+
+一键脚本（Termux 里一行，会自动装 proot Ubuntu 再装 OCR，约 600MB）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nihao8602/86-/main/install-termux.sh | bash
+```
+
+已经身处自己的 Linux / proot Ubuntu / chroot 里的话，直接 `bash install-termux.sh` 即可（不带参数）。
+
+装完手机上的油猴脚本 OCR 地址填 `http://127.0.0.1:8000/ocr` —— 服务就在这台手机上，**不需要电脑**。
+
+> ⚠️ 手机上的几个硬约束（脚本已自动处理，列出来免得你踩）：
+> - `paddlepaddle` 官方只发 **glibc** 包，**Termux 原生（bionic）装不了**，必须走 Ubuntu 容器
+> - `opencv-python-headless==4.10.0.84` 要钉死：opencv 5.x 会要求 numpy≥2，和 paddlepaddle 2.6.2 冲突
+> - ARM 上必须**关掉 MKLDNN**（Intel x86 专用），脚本按架构自动处理
+> - `imgaug` 推理用不到（只有训练用），脚本把它改成可选导入，省掉一堆依赖
+> - 启动必须 `setsid` 完全后台：proot 是 ptrace 型，前台跑会一直占住调用方的终端会话
+> - 手机 CPU 上单张漫画页大约 **5-30 秒**（电脑上通常 1-3 秒）
 
 ### 2. 用户脚本
 
