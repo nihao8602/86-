@@ -1,0 +1,5 @@
+# Windows 批处理与脚本：换行按原样存储，不做 LF/CRLF 自动转换
+# 原因：cmd 的 goto/标签在 LF 换行下会失效
+*.cmd -text
+*.bat -text
+*.ps1 -text
