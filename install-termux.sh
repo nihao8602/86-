@@ -30,6 +30,7 @@ SERVER_FILE="local-ocr-server.py"
 PORT=8000
 PY_MIN_MAJOR=3
 PY_MIN_MINOR=10
+PY_MAX_MINOR=12   # paddlepaddle 2.6.2 的官方 wheel 只发到 cp312：3.13/3.14 上 pip 会去编译源码，基本装不成
 
 # ---------- 输出助手 ----------
 c_ok()   { printf '  \033[32m[OK]\033[0m   %s\n' "$*"; }
@@ -205,17 +206,43 @@ case "$ARCH" in
     *) c_warn "架构 $ARCH 可能没有 PaddlePaddle 官方 wheel，继续尝试" ;;
 esac
 
-PY=""
-for cand in python3 python; do
-    if has "$cand"; then
+# 在支持范围（3.10 ~ 3.12）里挑一个，按版本从高到低
+pick_python() {
+    for cand in "$@"; do
+        has "$cand" || continue
         v="$("$cand" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || true)"
-        if [ -n "$v" ]; then
-            maj="${v%%.*}"; min="${v##*.}"
-            if [ "$maj" -eq "$PY_MIN_MAJOR" ] && [ "$min" -ge "$PY_MIN_MINOR" ]; then PY="$cand"; break; fi
+        [ -n "$v" ] || continue
+        maj="${v%%.*}"; min="${v##*.}"
+        if [ "$maj" -eq "$PY_MIN_MAJOR" ] && [ "$min" -ge "$PY_MIN_MINOR" ] && [ "$min" -le "$PY_MAX_MINOR" ]; then
+            echo "$cand"
+            return 0
         fi
+    done
+    return 1
+}
+
+DEFAULT_PY_VER="$( (python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null) || echo '?' )"
+PY="$(pick_python python3.12 python3.11 python3.10 python3 python || true)"
+if [ -z "$PY" ]; then
+    c_warn "系统里的 Python（默认 python3 = $DEFAULT_PY_VER）不在支持范围内。"
+    c_warn "原因：paddlepaddle 2.6.2 的官方 wheel 只发到 cp312（Python 3.12），"
+    c_warn "      3.13 / 3.14 上 pip 会去编译源码，numpy 1.26 也编不过，基本注定失败。"
+    if has apt-get; then
+        c_warn '尝试用 apt 装一个 python3.12 ...'
+        (sudo apt-get install -y python3.12 python3.12-venv >/dev/null 2>&1 \
+            || apt-get install -y python3.12 python3.12-venv >/dev/null 2>&1) || true
+        PY="$(pick_python python3.12 python3.11 python3.10 || true)"
     fi
-done
-[ -n "$PY" ] || die "没找到 Python ${PY_MIN_MAJOR}.${PY_MIN_MINOR}+。Debian/Ubuntu 上装： sudo apt install python3 python3-venv"
+fi
+if [ -z "$PY" ]; then
+    c_warn 'apt 里也没有可用版本。手动装一个 3.12 再重跑本脚本，例如：'
+    c_warn '  Ubuntu： sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt update && sudo apt install python3.12 python3.12-venv'
+    c_warn '  Debian： sudo apt install python3.12 python3.12-venv（仓库里没有的话用 uv）'
+    c_warn '  或者：  curl -LsSf https://astral.sh/uv/install.sh | sh && uv python install 3.12'
+    die "没有可用的 Python 3.10 ~ 3.12。"
+fi
+[ "$PY" = "python3" ] || c_warn "系统默认 python3 是 $DEFAULT_PY_VER，已改用 $PY（paddlepaddle 2.6.2 只支持到 3.12）"
+PY_VER="$("$PY" -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
 c_ok "Python： $("$PY" -c 'import sys;print(sys.version.split()[0], sys.executable)')"
 
 if ! has curl; then
@@ -248,10 +275,18 @@ fi
 step '2/6 创建独立运行环境（venv）'
 mkdir -p "$INSTALL_DIR" || die "无法创建目录：$INSTALL_DIR"
 if [ -x "$VENV_PY" ]; then
-    c_ok "已存在，跳过：$VENV"
+    _vv="$("$VENV_PY" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
+    if [ "$_vv" = "$PY_VER" ]; then
+        c_ok "已存在，跳过：$VENV"
+    else
+        c_warn "已有的 venv 是 Python $_vv，和选定的 $PY_VER 不一致，删掉重建"
+        rm -rf "$VENV"
+        "$PY" -m venv "$VENV" || die "创建虚拟环境失败：$VENV"
+        c_ok "已重建：$VENV（Python $PY_VER）"
+    fi
 else
     "$PY" -m venv "$VENV" || die '创建虚拟环境失败'
-    c_ok "已创建：$VENV"
+    c_ok "已创建：$VENV（Python $PY_VER）"
 fi
 
 # ---------- 3. 依赖 ----------
