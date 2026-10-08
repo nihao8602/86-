@@ -352,7 +352,7 @@ else
 fi
 
 # ---------- 4. 自愈补依赖 ----------
-step '4/6 补齐缺的依赖（自动检测，最多重试 5 轮）'
+step '4/6 补齐缺的依赖（自动检测，最多 15 轮）'
 # paddleocr 是 --no-deps 装的，这里靠 ImportError 反查缺什么、装什么
 mod_to_pkg() {
     case "$1" in
@@ -367,33 +367,19 @@ mod_to_pkg() {
         *) echo "$1" ;;
     esac
 }
-round=1
-while [ "$round" -le 5 ]; do
-    missing="$("$VENV_PY" -c 'import paddleocr, fastapi, uvicorn' 2>&1 | sed -n "s/.*No module named '\([^']*\)'.*/\1/p" | head -1)"
-    [ -z "$missing" ] && break
-    case "$missing" in
-        imgaug|imgaug.*)
-            c_warn '缺 imgaug（我们不用它，下面会给 paddleocr 打个可选导入补丁）'
-            break
-            ;;
-    esac
-    pkg="$(mod_to_pkg "${missing%%.*}")"
-    c_warn "缺 ${missing} → 安装 ${pkg}"
-    pip_try "$pkg" || c_warn "${pkg} 安装失败，继续尝试下一轮"
-    round=$((round + 1))
-done
-if "$VENV_PY" -c 'import paddleocr, fastapi, uvicorn' >/dev/null 2>&1; then
-    c_ok 'paddleocr / fastapi / uvicorn 导入正常'
-else
-    c_warn '还有导入问题，但先继续（下面的补丁可能正好解决它）'
-fi
 
-# ---------- 5. 打补丁 + 服务端 ----------
-step '5/6 打补丁并放置服务端'
-SITE="$("$VENV_PY" -c 'import sysconfig;print(sysconfig.get_paths()["purelib"])' 2>/dev/null || true)"
-IAA="$SITE/paddleocr/ppocr/data/imaug/iaa_augment.py"
-if [ -n "$SITE" ] && [ -f "$IAA" ]; then
-    "$VENV_PY" - "$IAA" <<'PYEOF'
+# imgaug 补丁：推理根本用不到它，改成可选导入，省掉一大串训练侧依赖。
+# ⚠️ 必须在自愈循环**之前**打：imgaug 挡在 paddleocr 的 import 链最前面，
+#    不打补丁的话循环每轮只会看到它，永远发现不了后面还缺 lmdb / pyyaml / tqdm 之类。
+patch_imgaug() {
+    _site="$("$VENV_PY" -c 'import sysconfig;print(sysconfig.get_paths()["purelib"])' 2>/dev/null || true)"
+    [ -n "$_site" ] || return 0
+    _iaa="$_site/paddleocr/ppocr/data/imaug/iaa_augment.py"
+    if [ ! -f "$_iaa" ]; then
+        c_warn '没找到 iaa_augment.py，跳过 imgaug 补丁'
+        return 0
+    fi
+    "$VENV_PY" - "$_iaa" <<'PYEOF'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text(encoding='utf-8')
@@ -417,9 +403,29 @@ if patched:
 else:
     print('  [警告] no imgaug import line found (paddleocr version changed?)')
 PYEOF
+}
+
+patch_imgaug
+round=1
+while [ "$round" -le 15 ]; do
+    missing="$("$VENV_PY" -c 'import paddleocr, fastapi, uvicorn' 2>&1 | sed -n "s/.*No module named '\([^']*\)'.*/\1/p" | head -1)"
+    [ -z "$missing" ] && break
+    pkg="$(mod_to_pkg "${missing%%.*}")"
+    c_warn "缺 ${missing} → 安装 ${pkg}"
+    pip_try "$pkg" || c_warn "${pkg} 安装失败，继续尝试下一轮"
+    round=$((round + 1))
+done
+if "$VENV_PY" -c 'import paddleocr, fastapi, uvicorn' >/dev/null 2>&1; then
+    c_ok 'paddleocr / fastapi / uvicorn 导入正常'
 else
-    c_warn '没找到 iaa_augment.py，跳过 imgaug 补丁'
+    c_warn '依赖还是不全。手动补漏网的那个（把报错里的模块名填进去）：'
+    c_warn "  $VENV_PY -m pip install <模块名> -i $PIP_INDEX"
+    c_warn '  常见对应：lmdb→lmdb、yaml→pyyaml、PIL→Pillow、skimage→scikit-image'
 fi
+
+# ---------- 5. 打补丁 + 服务端 ----------
+step '5/6 打补丁并放置服务端'
+patch_imgaug    # Step 4 开头已经打过，这里幂等确认一次
 
 # 服务端：优先用脚本同目录的副本，否则从仓库下载
 SRC_SERVER="$(dirname "$0")/$SERVER_FILE"
