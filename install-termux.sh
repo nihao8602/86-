@@ -406,6 +406,22 @@ PYEOF
 }
 
 patch_imgaug
+
+# 依赖是一层层暴露的（imgaug → six → lmdb → pyyaml → …），每轮一次 pip 太慢。
+# 直接从 paddleocr 自己的 metadata 里读出依赖清单，一次装上；
+# 只跳过 imgaug（已用补丁替代）和 visualdl（训练用，一百多 MB 还拉一堆东西）。
+if "$VENV_PY" -c 'import paddleocr' >/dev/null 2>&1; then
+    c_ok 'paddleocr 导入正常'
+else
+    c_warn '按 paddleocr 声明的依赖一次补齐（跳过 imgaug / visualdl）...'
+    _reqs="$("$VENV_PY" -m pip show paddleocr 2>/dev/null | sed -n 's/^Requires: //p')"
+    if [ -n "$_reqs" ]; then
+        _list="$(printf '%s' "$_reqs" | tr ',' '\n' | tr -d ' ' | grep -v '^imgaug' | grep -v '^visualdl' | tr '\n' ' ')"
+        # 这里有意不加引号：要按空格拆成多个包名传给 pip
+        pip_try $_list || c_warn '这批里有装失败的，下面自愈循环会再逐个补'
+    fi
+fi
+
 round=1
 while [ "$round" -le 15 ]; do
     missing="$("$VENV_PY" -c 'import paddleocr, fastapi, uvicorn' 2>&1 | sed -n "s/.*No module named '\([^']*\)'.*/\1/p" | head -1)"
