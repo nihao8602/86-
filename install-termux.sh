@@ -14,6 +14,7 @@
 #  参数：
 #    --dir <路径>    自定义安装目录（默认 $HOME/manga-ocr）
 #    --python <路径> 指定 Python 解释器（必须是 3.10 ~ 3.12，因为 paddlepaddle 2.6.2 只发到 cp312）
+#    --no-autostart  不配置开机自启（默认会在 Termux 侧写好 ~/.termux/boot/start-ocr.sh）
 #    --uninstall     卸载（停服务、删目录、删启动脚本）
 #
 #  说明：全部装在独立目录 + 独立 venv，不改动系统 Python。
@@ -73,10 +74,12 @@ fi
 
 # ---------- 参数解析 ----------
 DO_UNINSTALL=0
+DO_AUTOSTART=1
 USER_PY=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --uninstall) DO_UNINSTALL=1; shift ;;
+        --no-autostart) DO_AUTOSTART=0; shift ;;
         --dir) INSTALL_DIR="${2:-}"; [ -n "$INSTALL_DIR" ] || die "--dir 需要跟一个路径"; shift 2 ;;
         --dir=*) INSTALL_DIR="${1#--dir=}"; shift ;;
         --python) USER_PY="${2:-}"; [ -n "$USER_PY" ] || die "--python 需要跟一个解释器路径"; shift 2 ;;
@@ -106,7 +109,7 @@ if [ "$DO_UNINSTALL" = "1" ]; then
         c_ok '安装目录本来就不存在'
     fi
     # Termux 侧的包装启动器
-    for f in "$HOME/start-ocr-termux.sh" "$HOME/stop-ocr-termux.sh"; do
+    for f in "$HOME/start-ocr-termux.sh" "$HOME/stop-ocr-termux.sh" "$HOME/.termux/boot/start-ocr.sh"; do
         [ -f "$f" ] && rm -f "$f" && c_ok "已删除：$f"
     done
     printf '\n  卸载完成。浏览器/油猴里的那个脚本请自行删除。\n\n'
@@ -187,8 +190,29 @@ SH
     printf '  手机上的油猴脚本：安装/打开「漫画翻译引擎」面板 → 识别(OCR)\n'
     printf '    模式选「本地」，地址填： http://127.0.0.1:8000/ocr\n'
     printf '    （服务就在这台手机上，不用连电脑；设备选「手机端」更快）\n\n'
+    # 开机自启：Termux:Boot 插件会执行 ~/.termux/boot/ 下的脚本（免 root 的官方方式）
+    if [ "$DO_AUTOSTART" = "1" ]; then
+        mkdir -p "$HOME/.termux/boot"
+        cat > "$HOME/.termux/boot/start-ocr.sh" <<'SH'
+#!/data/data/com.termux/files/usr/bin/sh
+# 由 Termux:Boot 插件在开机时执行。
+# 需要先在 F-Droid 安装 Termux:Boot，并至少手动启动它一次（否则开机不会触发）。
+termux-wake-lock 2>/dev/null
+nohup sh "$HOME/start-ocr-termux.sh" >/dev/null 2>&1 &
+SH
+        chmod +x "$HOME/.termux/boot/start-ocr.sh" 2>/dev/null
+        c_ok '已写好开机自启脚本：~/.termux/boot/start-ocr.sh'
+    fi
+
     printf '  启动： bash ~/start-ocr-termux.sh\n'
     printf '  停止： bash ~/stop-ocr-termux.sh\n\n'
+    if [ "$DO_AUTOSTART" = "1" ]; then
+        printf '  开机自启：脚本已就位，但还需要你去 F-Droid 装 Termux:Boot 插件，\n'
+        printf '            并手动启动它一次（不启动一次的话开机不会触发）。\n'
+        printf '            装好后重启手机验证： curl -s http://127.0.0.1:8000/\n\n'
+    else
+        printf '  开机自启：未配置（你用了 --no-autostart）\n\n'
+    fi
     printf '  卸载： proot-distro login ubuntu -- bash /root/install-termux.sh --uninstall\n\n'
     exit 0
 fi
