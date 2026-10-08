@@ -246,10 +246,17 @@ if [ -n "$USER_PY" ]; then
 fi
 [ -n "$PY" ] || PY="$(pick_python python3.12 python3.11 python3.10 python3 python || true)"
 # uv 兜底：发行版仓库里没有 3.12 时，用 uv 拉一个独立构建的 3.12
-if [ -z "$PY" ] && has uv; then
+# uv 常装在 ~/.local/bin，那个目录不一定在 PATH 里，所以两种都找
+UV_BIN=""
+if has uv; then
+    UV_BIN="uv"
+elif [ -x "$HOME/.local/bin/uv" ]; then
+    UV_BIN="$HOME/.local/bin/uv"
+fi
+if [ -z "$PY" ] && [ -n "$UV_BIN" ]; then
     c_warn '系统里没有 3.10~3.12，尝试用 uv 装一个 3.12 ...'
-    uv python install 3.12 >/dev/null 2>&1 || true
-    PY="$(_ver_in_range "$(uv python find 3.12 2>/dev/null || true)" || true)"
+    "$UV_BIN" python install 3.12 >/dev/null 2>&1 || true
+    PY="$(_ver_in_range "$("$UV_BIN" python find 3.12 2>/dev/null || true)" || true)"
     [ -n "$PY" ] && c_ok "uv 装好了 Python：$PY"
 fi
 if [ -z "$PY" ]; then
