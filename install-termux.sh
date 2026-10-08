@@ -158,23 +158,50 @@ if in_termux; then
     " < /dev/null || die 'Ubuntu 里的安装过程失败，请把上面的报错发出来'
 
     step '收尾：生成 Termux 侧的启动器'
+    # ⚠️ 核心坑：proot-distro 起的 proot 带 --kill-on-exit —— proot 一退出，
+    #    容器里的 python 服务会被一起杀掉。而 `bash -lc '...start-ocr.sh'` 跑完就退，
+    #    所以必须在末尾挂一个不退出的东西（exec sleep infinity）把 proot 拴住，
+    #    否则现象是：打印"就绪"之后服务立刻消失，stop 时提示"本来就没在跑"。
     cat > "$HOME/start-ocr-termux.sh" <<'SH'
 #!/data/data/com.termux/files/usr/bin/bash
-# 启动 Ubuntu 容器里的 OCR 服务（后台），然后等它起来
+# 启动 Ubuntu 容器里的 OCR 服务（后台常驻）
+PIDF="$HOME/.ocr-proot.pid"
+LOG="$HOME/ocr-start.log"
 termux-wake-lock 2>/dev/null
-nohup proot-distro login ubuntu -- bash -lc 'bash "$HOME/manga-ocr/start-ocr.sh"' >/dev/null 2>&1 &
-for i in $(seq 1 40); do
+
+# 已经在跑就不重复启动（用 /dev/tcp 探测，避开 http_proxy 干扰）
+if (exec 3<>/dev/tcp/127.0.0.1/8000) 2>/dev/null; then
+    echo "OCR 已经在跑： http://127.0.0.1:8000/ocr"
+    exit 0
+fi
+# 清掉上一次残留的常驻 proot
+if [ -f "$PIDF" ]; then
+    kill "$(cat "$PIDF")" 2>/dev/null
+    rm -f "$PIDF"
+fi
+nohup proot-distro login ubuntu -- bash -lc 'bash /root/manga-ocr/start-ocr.sh; exec sleep infinity' \
+    < /dev/null > "$LOG" 2>&1 &
+echo $! > "$PIDF"
+
+for i in $(seq 1 60); do
     sleep 3
-    if curl -s -m 2 -o /dev/null "http://127.0.0.1:8000/"; then
-        echo "OCR 服务已就绪： http://127.0.0.1:8000/ocr"
+    if (exec 3<>/dev/tcp/127.0.0.1/8000) 2>/dev/null; then
+        echo "就绪： http://127.0.0.1:8000/ocr"
         exit 0
     fi
 done
-echo "还没起来，看日志： proot-distro login ubuntu -- tail -30 ~/manga-ocr/ocr-server.log"
+echo "还没起来，看日志： tail -30 $LOG"
+exit 1
 SH
     cat > "$HOME/stop-ocr-termux.sh" <<'SH'
 #!/data/data/com.termux/files/usr/bin/bash
-proot-distro login ubuntu -- bash -lc 'bash "$HOME/manga-ocr/stop-ocr.sh"'
+PIDF="$HOME/.ocr-proot.pid"
+# 先让容器里的服务自己退，再杀掉拴住它的常驻 proot
+proot-distro login ubuntu -- bash -lc 'bash /root/manga-ocr/stop-ocr.sh' 2>/dev/null
+if [ -f "$PIDF" ]; then
+    kill "$(cat "$PIDF")" 2>/dev/null
+    rm -f "$PIDF"
+fi
 termux-wake-unlock 2>/dev/null
 echo "已停止"
 SH
@@ -194,11 +221,11 @@ SH
     if [ "$DO_AUTOSTART" = "1" ]; then
         mkdir -p "$HOME/.termux/boot"
         cat > "$HOME/.termux/boot/start-ocr.sh" <<'SH'
-#!/data/data/com.termux/files/usr/bin/sh
+#!/data/data/com.termux/files/usr/bin/bash
 # 由 Termux:Boot 插件在开机时执行。
 # 需要先在 F-Droid 安装 Termux:Boot，并至少手动启动它一次（否则开机不会触发）。
 termux-wake-lock 2>/dev/null
-nohup sh "$HOME/start-ocr-termux.sh" >/dev/null 2>&1 &
+nohup bash "$HOME/start-ocr-termux.sh" >/dev/null 2>&1 &
 SH
         chmod +x "$HOME/.termux/boot/start-ocr.sh" 2>/dev/null
         c_ok '已写好开机自启脚本：~/.termux/boot/start-ocr.sh'
