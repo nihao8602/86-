@@ -547,7 +547,29 @@ c_ok "停止： bash $STOP_SH"
 "$START_SH" || true
 
 # ---------- 完成 ----------
-LAN_IP="$(ip route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)"
+# 拿本机局域网 IP：容器里常缺 ip/hostname/ifconfig，所以先用 venv 的 python 选一次路由
+LAN_IP=""
+if [ -x "$VENV_PY" ]; then
+    LAN_IP="$("$VENV_PY" - <<'PY' 2>/dev/null || true
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.connect(("8.8.8.8", 80))   # 只用来选路由，不会真的发包
+    print(s.getsockname()[0])
+except Exception:
+    pass
+PY
+)"
+fi
+if [ -z "$LAN_IP" ]; then
+    LAN_IP="$(ip route get 1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)"
+fi
+if [ -z "$LAN_IP" ]; then
+    LAN_IP="$(ip -4 addr show 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | grep -v '^127\.' | head -1)"
+fi
+if [ -z "$LAN_IP" ]; then
+    LAN_IP="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.' | head -1)"
+fi
 printf '\n=====================================================\n'
 printf '  部署完成！\n'
 printf '=====================================================\n\n'
