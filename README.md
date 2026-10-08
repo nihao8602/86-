@@ -88,7 +88,7 @@ python local-ocr-server.py
 
 ## 手机 / 局域网使用
 
-1. 电脑上以管理员运行一次 `restart-ocr.bat`（放行防火墙 8000 端口）
+1. 放行防火墙 8000 端口：用一键部署（方式 A）的已经自动放行了，跳过这步；手动装的请以管理员运行一次 `restart-ocr.bat`
 2. 查电脑局域网 IP：`ipconfig`
 3. 手机脚本面板：
    - OCR 地址填 `http://电脑IP:8000/ocr`
