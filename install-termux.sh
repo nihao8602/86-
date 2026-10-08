@@ -12,8 +12,9 @@
 #        bash install-termux.sh --uninstall
 #
 #  参数：
-#    --dir <路径>   自定义安装目录（默认 $HOME/manga-ocr）
-#    --uninstall    卸载（停服务、删目录、删启动脚本）
+#    --dir <路径>    自定义安装目录（默认 $HOME/manga-ocr）
+#    --python <路径> 指定 Python 解释器（必须是 3.10 ~ 3.12，因为 paddlepaddle 2.6.2 只发到 cp312）
+#    --uninstall     卸载（停服务、删目录、删启动脚本）
 #
 #  说明：全部装在独立目录 + 独立 venv，不改动系统 Python。
 #        关键版本由 constraints 钉死：numpy<2 + opencv-python-headless==4.10.0.84
@@ -72,11 +73,14 @@ fi
 
 # ---------- 参数解析 ----------
 DO_UNINSTALL=0
+USER_PY=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --uninstall) DO_UNINSTALL=1; shift ;;
         --dir) INSTALL_DIR="${2:-}"; [ -n "$INSTALL_DIR" ] || die "--dir 需要跟一个路径"; shift 2 ;;
         --dir=*) INSTALL_DIR="${1#--dir=}"; shift ;;
+        --python) USER_PY="${2:-}"; [ -n "$USER_PY" ] || die "--python 需要跟一个解释器路径"; shift 2 ;;
+        --python=*) USER_PY="${1#--python=}"; shift ;;
         -h|--help) sed -n '2,25p' "$0" 2>/dev/null || true; exit 0 ;;
         *) c_warn "忽略未知参数：$1"; shift ;;
     esac
@@ -222,7 +226,32 @@ pick_python() {
 }
 
 DEFAULT_PY_VER="$( (python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null) || echo '?' )"
-PY="$(pick_python python3.12 python3.11 python3.10 python3 python || true)"
+PY=""
+_ver_in_range() {
+    # $1 = 解释器路径/命令，命中就把它 echo 出来
+    [ -n "$1" ] || return 1
+    { [ -x "$1" ] || has "$1"; } || return 1
+    _v="$("$1" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || true)"
+    [ -n "$_v" ] || return 1
+    _min="${_v##*.}"
+    case "$_min" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$_min" -ge "$PY_MIN_MINOR" ] && [ "$_min" -le "$PY_MAX_MINOR" ]; then echo "$1"; return 0; fi
+    return 1
+}
+
+if [ -n "$USER_PY" ]; then
+    PY="$(_ver_in_range "$USER_PY" || true)"
+    [ -n "$PY" ] || die "--python 指定的解释器不可用，或版本不在 3.10 ~ 3.12：$USER_PY"
+    c_ok "--python 指定：$PY"
+fi
+[ -n "$PY" ] || PY="$(pick_python python3.12 python3.11 python3.10 python3 python || true)"
+# uv 兜底：发行版仓库里没有 3.12 时，用 uv 拉一个独立构建的 3.12
+if [ -z "$PY" ] && has uv; then
+    c_warn '系统里没有 3.10~3.12，尝试用 uv 装一个 3.12 ...'
+    uv python install 3.12 >/dev/null 2>&1 || true
+    PY="$(_ver_in_range "$(uv python find 3.12 2>/dev/null || true)" || true)"
+    [ -n "$PY" ] && c_ok "uv 装好了 Python：$PY"
+fi
 if [ -z "$PY" ]; then
     c_warn "系统里的 Python（默认 python3 = $DEFAULT_PY_VER）不在支持范围内。"
     c_warn "原因：paddlepaddle 2.6.2 的官方 wheel 只发到 cp312（Python 3.12），"
