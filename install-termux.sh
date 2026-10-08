@@ -48,6 +48,27 @@ in_termux() {
 
 ARCH="$(uname -m)"
 
+# ---------- 从管道执行时自愈 ----------
+# `curl ... | bash` 的时候 stdin 是管道，proot 绑定不了它，会报
+#   proot warning: can't sanitize binding "/proc/self/fd/0"
+# 严重时 proot-distro 会直接卡住。这里自动落成文件、用 /dev/tty 重跑一次。
+if [ ! -t 0 ] && [ -z "${MANGA_OCR_REEXEC:-}" ]; then
+    printf '\n[提示] 检测到是从管道执行（curl | bash）—— proot 需要真正的终端，\n'
+    printf '       正在改用文件方式重跑...\n'
+    _tmp="${TMPDIR:-/tmp}/install-termux.sh"
+    if has curl && curl -fsSL "$RAW/install-termux.sh" -o "$_tmp" 2>/dev/null && [ -s "$_tmp" ]; then
+        if [ -r /dev/tty ]; then
+            MANGA_OCR_REEXEC=1 exec bash "$_tmp" "$@" < /dev/tty
+        else
+            MANGA_OCR_REEXEC=1 exec bash "$_tmp" "$@" < /dev/null
+        fi
+    fi
+    c_warn '自动重跑没成功，请手动执行下面两行：'
+    c_warn "  curl -fsSL $RAW/install-termux.sh -o ~/install-termux.sh"
+    c_warn '  bash ~/install-termux.sh'
+    exit 1
+fi
+
 # ---------- 参数解析 ----------
 DO_UNINSTALL=0
 while [ $# -gt 0 ]; do
@@ -126,7 +147,7 @@ if in_termux; then
         apt-get install -y -qq curl ca-certificates python3 python3-venv >/dev/null 2>&1 || true
         curl -fsSL '$RAW/install-termux.sh' -o /root/install-termux.sh
         bash /root/install-termux.sh
-    " || die 'Ubuntu 里的安装过程失败，请把上面的报错发出来'
+    " < /dev/null || die 'Ubuntu 里的安装过程失败，请把上面的报错发出来'
 
     step '收尾：生成 Termux 侧的启动器'
     cat > "$HOME/start-ocr-termux.sh" <<'SH'
