@@ -45,6 +45,8 @@ $ServerUrls = @(
 )
 $PipIndexes = @(
     'https://pypi.tuna.tsinghua.edu.cn/simple',
+    'https://mirrors.aliyun.com/pypi/simple/',
+    'https://mirrors.cloud.tencent.com/pypi/simple',
     'https://pypi.org/simple'
 )
 # 版本组合是硬约束：paddlepaddle 2.6.2 必须配 numpy<2，paddleocr 必须 2.x
@@ -97,7 +99,8 @@ function Invoke-ExeLive {
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & $Exe @ExeArgs
+        # 输出直接送控制台，不能留在函数返回值里：否则 pip 的 stdout 会和退出码混成一团
+        & $Exe @ExeArgs 2>&1 | Out-Host
         return $LASTEXITCODE
     } finally { $ErrorActionPreference = $old }
 }
@@ -342,7 +345,7 @@ if (-not $needInstall) {
         try {
             Say "    pip 源：$idx" 'DarkGray'
             [void](Invoke-ExeLive -Exe $venvPy -ExeArgs @('-m', 'pip', 'install', '--upgrade', 'pip', '--no-warn-script-location', '-i', $idx, '--quiet'))
-            $rc = Invoke-ExeLive -Exe $venvPy -ExeArgs (@('-m', 'pip', 'install', '-c', $constraints, '--no-warn-script-location', '-i', $idx) + $Packages)
+            $rc = Invoke-ExeLive -Exe $venvPy -ExeArgs (@('-m', 'pip', 'install', '-c', $constraints, '--no-warn-script-location', '--retries', '3', '--timeout', '60', '-i', $idx) + $Packages)
             if ($rc -ne 0) { throw "pip 返回代码 $rc" }
             $installed = $true
             break
@@ -351,7 +354,15 @@ if (-not $needInstall) {
         }
     }
     if (-not $installed) {
-        Die '依赖安装失败。常见原因：网络不稳定 / 需要代理 / 磁盘空间不足。可挂上代理后重新运行本脚本。'
+        Say ''
+        Warn "$($PipIndexes.Count) 个 pip 源都没装上，按这个顺序排查："
+        Warn '  1) 开着代理的话先关掉代理重试 —— 国内镜像直连通常更快，走代理反而可能被限流'
+        Warn '  2) 反过来：本来就连不上 GitHub / PyPI 的话，挂上代理再跑一次本脚本'
+        Warn '  3) 报 "from versions: none" 基本都是网络 / 代理问题，不是包不存在'
+        Warn '  4) 报 "No space left on device" 就是磁盘满了'
+        Warn '  5) 想手动验证某个源通不通：'
+        Warn "     `"$venvPy`" -m pip install setuptools -i <源地址>"
+        Die '依赖安装失败。'
     }
     Ok '依赖安装完成'
 }
