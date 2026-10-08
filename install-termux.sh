@@ -416,9 +416,20 @@ else
     c_warn '按 paddleocr 声明的依赖一次补齐（跳过 imgaug / visualdl）...'
     _reqs="$("$VENV_PY" -m pip show paddleocr 2>/dev/null | sed -n 's/^Requires: //p')"
     if [ -n "$_reqs" ]; then
-        _list="$(printf '%s' "$_reqs" | tr ',' '\n' | tr -d ' ' | grep -v '^imgaug' | grep -v '^visualdl' | tr '\n' ' ')"
-        # 这里有意不加引号：要按空格拆成多个包名传给 pip
-        pip_try $_list || c_warn '这批里有装失败的，下面自愈循环会再逐个补'
+        # 必须用数组逐个传，不能拼成一个字符串再让 shell 拆词：
+        # 包名里带 <= / >=（opencv-python<=4.6.0.66、fire>=0.3.0），
+        # 不加引号时 < 和 > 会被 shell 当成重定向 —— 版本约束会丢失（opencv 被升到最新），
+        # > 还可能凭空建出文件来。
+        _pkgs=()
+        while IFS= read -r _p; do
+            [ -n "$_p" ] || continue
+            _pkgs+=("$_p")
+        done <<EOF
+$(printf '%s' "$_reqs" | tr ',' '\n' | tr -d ' ' | grep -v '^imgaug' | grep -v '^visualdl')
+EOF
+        if [ "${#_pkgs[@]}" -gt 0 ]; then
+            pip_try "${_pkgs[@]}" || c_warn '这批里有装失败的，下面自愈循环会再逐个补'
+        fi
     fi
 fi
 
