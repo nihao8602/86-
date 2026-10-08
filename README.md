@@ -43,13 +43,14 @@ manga-translate/
 不想折腾 Python 环境就用这个：脚本会自动装好 **Python 3.12 + PaddleOCR + 本地识别服务**，
 全部放进独立的 `%USERPROFILE%\manga-ocr` 目录，**不会影响你系统里已有的 Python**。
 
-用法（二选一）：
+用法（三种任选，效果一样）：
 
-1. 下载本仓库的 `install.cmd`，**双击运行**（推荐）
-2. 或打开 PowerShell，粘贴这一行后回车：
+1. 下载本仓库的 `install.cmd`，**双击运行**（推荐，最省事）
+2. 或打开 PowerShell，粘贴这一行回车（自动下载部署脚本再执行）：
+3. 或下载 `install.ps1` 后直接跑：`powershell -ExecutionPolicy Bypass -File .\install.ps1`
 
 ```powershell
-irm https://raw.githubusercontent.com/nihao8602/86-/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/nihao8602/86-/main/install.cmd -OutFile "$env:TEMP\manga-install.cmd"; & "$env:TEMP\manga-install.cmd"
 ```
 
 过程大约 5-15 分钟（要下载约 600MB 依赖）。装完桌面会多出一个「启动漫画OCR」，
@@ -59,8 +60,9 @@ irm https://raw.githubusercontent.com/nihao8602/86-/main/install.ps1 | iex
 powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\manga-ocr\install.ps1" -Uninstall
 ```
 
-> ⚠️ 如果运行时报中文乱码或语法错误，说明脚本被当成 GBK 读了：请改用 `install.cmd`
-> 双击运行，或用上面的 `irm ... | iex`；**不要**手动下载 `install.ps1` 后直接右键「使用 PowerShell 运行」。
+> ⚠️ **不要**写成 `irm https://.../install.ps1 | iex`（把脚本内容直接管道给 iex）：
+> 这种写法会让脚本丢掉 UTF-8 BOM，PowerShell 5.1 就会按 GBK 解码，中文注释里的引号、括号被吞掉，
+> 直接报一堆「意外的标记」「缺少右括号」的语法错误。请用上面三种方式之一（都以"文件"形式执行）。
 >
 > 需要代理才能访问 `raw.githubusercontent.com` 的话，请先开代理再运行。
 > 手机连不上电脑的 OCR，一般是 8000 端口没放行 —— 重新运行一次部署脚本即可（会弹 UAC）。
