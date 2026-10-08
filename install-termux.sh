@@ -212,31 +212,76 @@ SH
     printf '\n=====================================================\n'
     printf '  部署完成！\n'
     printf '=====================================================\n\n'
-    printf '  OCR 服务跑在 Ubuntu 容器里，装在 /root/manga-ocr\n'
+    printf '  OCR 服务跑在 Ubuntu 容器里：目录 /root/manga-ocr\n'
+    printf '    ⚠️ 目录名叫 manga-ocr，但引擎是 PaddleOCR：服务文件 local-ocr-server.py，\n'
+    printf '       venv 在同目录下的 venv/（不是 .venv），里面只有 paddleocr + paddlepaddle，没有 manga_ocr 包。\n'
     printf '  日志： /root/manga-ocr/ocr-server.log\n\n'
     printf '  手机上的油猴脚本：安装/打开「漫画翻译引擎」面板 → 识别(OCR)\n'
     printf '    模式选「本地」，地址填： http://127.0.0.1:8000/ocr\n'
     printf '    （服务就在这台手机上，不用连电脑；设备选「手机端」更快）\n\n'
-    # 开机自启：Termux:Boot 插件会执行 ~/.termux/boot/ 下的脚本（免 root 的官方方式）
+    # ---------- 开机自启（铺两条路，按设备可用性选）----------
+    # ② Termux:Boot 是官方免 root 方式，但**并非所有机型都能装**：
+    #    已知 Flyme / Android 16 会以 INSTALL_FAILED_USER_RESTRICTED 拒绝安装该插件
+    #    （usb_install_item_com.termux.boot 被强制写回 0，UI 与 pm install 都被取消）。
+    #    所以这里同时铺 ③ APatch/Magisk 的 service.d 入口。
     if [ "$DO_AUTOSTART" = "1" ]; then
-        mkdir -p "$HOME/.termux/boot"
-        cat > "$HOME/.termux/boot/start-ocr.sh" <<'SH'
+        _tuid="$(id -u 2>/dev/null || echo 10266)"
+
+        # ① Termux 侧总入口：拉起看门狗（它负责把服务拉起来并保活）
+        cat > "$HOME/boot-ocr.sh" <<'BOOTSH'
 #!/data/data/com.termux/files/usr/bin/bash
-# 由 Termux:Boot 插件在开机时执行。
-# 需要先在 F-Droid 安装 Termux:Boot，并至少手动启动它一次（否则开机不会触发）。
+# 开机总入口（Termux 身份）：起看门狗 + 直接拉一次服务
 termux-wake-lock 2>/dev/null
+# 方括号写法只挡得住 pgrep 自己；这条命令里没有别处出现明文 ocr-watchdog.sh，所以安全。
+# （若把启动看门狗的那行并进同一条命令，就会自己匹配自己、把自己杀掉）
+if ! pgrep -f 'ocr-watchdo[g].sh' >/dev/null 2>&1; then
+    setsid nohup bash "$HOME/ocr-watchdog.sh" >/dev/null 2>&1 &
+fi
 nohup bash "$HOME/start-ocr-termux.sh" >/dev/null 2>&1 &
-SH
+BOOTSH
+        chmod +x "$HOME/boot-ocr.sh" 2>/dev/null
+        c_ok '已写好开机总入口：~/boot-ocr.sh'
+
+        # ② Termux:Boot 入口（能装插件的机型走这条）
+        mkdir -p "$HOME/.termux/boot"
+        cat > "$HOME/.termux/boot/start-ocr.sh" <<'TBSH'
+#!/data/data/com.termux/files/usr/bin/bash
+# 由 Termux:Boot 插件在开机时执行（需 F-Droid 版，并手动启动过它一次）。
+# ⚠️ 有些机型装不上这个插件（实测 Flyme / Android 16 返回 INSTALL_FAILED_USER_RESTRICTED），
+#    那种情况请用 /data/adb/service.d/99-ocr-termux.sh 那条。
+sleep 20
+nohup bash "$HOME/boot-ocr.sh" >/dev/null 2>&1 &
+TBSH
         chmod +x "$HOME/.termux/boot/start-ocr.sh" 2>/dev/null
-        c_ok '已写好开机自启脚本：~/.termux/boot/start-ocr.sh'
+
+        # ③ APatch / Magisk service.d 入口（需要 root，写不进就只打印内容）
+        _sd="/data/adb/service.d/99-ocr-termux.sh"
+        _sdtxt="$(printf '%s\n' \
+            '#!/system/bin/sh' \
+            '# 开机脚本：等 Termux 环境就绪，再以 Termux 身份拉起 OCR。' \
+            '# su 必须写绝对路径 —— 开机早期 PATH 里没有它。' \
+            'sleep 45' \
+            "exec /system/bin/su $_tuid -c 'export HOME=/data/data/com.termux/files/home; export PATH=/data/data/com.termux/files/usr/bin:\$PATH; exec bash \"\$HOME/boot-ocr.sh\"'")"
+        if su -c "cat > $_sd" <<EOF >/dev/null 2>&1
+$_sdtxt
+EOF
+        then
+            su -c "chmod 700 $_sd" >/dev/null 2>&1
+            c_ok "已写好 service.d 开机脚本：$_sd"
+        else
+            c_warn "没能写 $_sd（需要 root）。要 root 方案自启就手动建这个文件，内容："
+            printf '%s\n' "$_sdtxt" | sed 's/^/          /'
+        fi
     fi
 
     printf '  启动： bash ~/start-ocr-termux.sh\n'
     printf '  停止： bash ~/stop-ocr-termux.sh\n\n'
     if [ "$DO_AUTOSTART" = "1" ]; then
-        printf '  开机自启：脚本已就位，但还需要你去 F-Droid 装 Termux:Boot 插件，\n'
-        printf '            并手动启动它一次（不启动一次的话开机不会触发）。\n'
-        printf '            装好后重启手机验证： curl -s http://127.0.0.1:8000/\n\n'
+        printf '  开机自启：已铺两条路 ——\n'
+        printf '    · Termux:Boot：去 F-Droid 装插件并手动启动它一次\n'
+        printf '      （⚠️ 部分机型装不上，实测 Flyme / Android 16 会被 INSTALL_FAILED_USER_RESTRICTED 拒绝）\n'
+        printf '    · APatch / Magisk：/data/adb/service.d/99-ocr-termux.sh（本脚本已尝试写入，需要 root）\n'
+        printf '    重启后验证： (exec 3<>/dev/tcp/127.0.0.1/8000) 2>/dev/null && echo OK\n\n'
     else
         printf '  开机自启：未配置（你用了 --no-autostart）\n\n'
     fi
