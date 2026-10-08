@@ -425,7 +425,7 @@ else
             [ -n "$_p" ] || continue
             _pkgs+=("$_p")
         done <<EOF
-$(printf '%s' "$_reqs" | tr ',' '\n' | tr -d ' ' | grep -v '^imgaug' | grep -v '^visualdl')
+$(printf '%s' "$_reqs" | tr ',' '\n' | tr -d ' ' | grep -v '^imgaug' | grep -v '^visualdl' | grep -v '^opencv-python' | grep -v '^opencv-contrib-python')
 EOF
         if [ "${#_pkgs[@]}" -gt 0 ]; then
             pip_try "${_pkgs[@]}" || c_warn '这批里有装失败的，下面自愈循环会再逐个补'
