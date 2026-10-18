@@ -6,15 +6,21 @@
 
 浏览器用户脚本 + 本地 OCR 服务：自动识别网页漫画里的文字（韩文 / 日文 / 英文），用大模型翻译成中文，并在原文上覆盖白底气泡。
 
+> 当前版本：**7.33.0**
+
 ## 功能特性
 
-- 🖼️ 自动识别漫画图片文字：韩文 / 日文 / 英文
+- 🖼️ 自动识别漫画图片文字：韩文 / 日文 / 英文；**气泡级分组**（同一气泡里的多行合成一句翻译，不再拆成碎片）
 - 🌐 多种翻译引擎：DeepSeek / 智谱 GLM / 腾讯混元 / 硅基流动 / 本地 Ollama（免费离线）
 - 🏠 本地 OCR（PaddleOCR），无云端配额限制；也可用百度 / ocr.space
 - 📱 手机 + 电脑双端，局域网共用电脑上的 OCR / 翻译服务
 - 💬 气泡自动贴合原文框，纯白底完全遮盖原文；可调节字号、气泡大小、面板缩放
+- 🧹 擦除原文再打译文（可选）：克隆气泡底色去字 + 边缘羽化，渐变气泡不会被刷成一块白
+- 🚫 自动过滤网址水印与 OCR 乱读碎片（不会把 `xxx.com`、气泡边缘曲线、装饰线当成台词打出来）
+- 🧠 术语表 + 上下文记忆：人名/专名跨页保持一致；可选手动术语表与自动记人名
+- ⚙️ 思考模式开关（默认关，仅 DeepSeek 官方域生效）
 - 📋 详细日志，方便排查卡顿
-- ✂️ 拟声词（特效字）自动跳过；翻译数量差量 ≤3 时自动接受，不反复重试
+- ✂️ 拟声词（特效字）自动跳过；译文按 `#[序号]` 对齐回填，缺失的逐条补翻，不会整体错位
 
 ## 使用场景
 
@@ -29,7 +35,7 @@ manga-translate/
 ├── install.cmd               # Windows 一键部署入口（双击即可装好本地 OCR）
 ├── install.ps1               # Windows 一键部署主脚本（install.cmd 会调用它）
 ├── install-termux.sh         # 手机（Android/Termux）与 Linux 一键部署脚本
-├── local-ocr-server.py       # 本地 OCR 服务（PaddleOCR，监听 0.0.0.0:8000）
+├── local-ocr-server.py       # 本地 OCR 服务（PaddleOCR，默认监听 0.0.0.0:8000；可用 OCR_HOST / OCR_PORT / OCR_TOKEN 覆盖）
 ├── restart-ocr.bat           # 一键重启 OCR 服务（含防火墙放行 8000）
 ├── setup-ollama-lan.bat      #（可选）让 Ollama 局域网可访问
 └── baidu-ocr-proxy.js        #（可选）百度 OCR Cloudflare 代理
@@ -43,7 +49,7 @@ manga-translate/
 |---|---|---|---|
 | 系统 | Windows 10 / 11 **64 位** | Android 7 及以上 | Ubuntu 20.04+ / Debian 11+（glibc） |
 | 运行环境 | PowerShell 5.1（系统自带） | **Termux**（建议从 [F-Droid](https://f-droid.org/packages/com.termux/) 装，应用商店里的版本太旧） | bash + curl |
-| 需要预装 Python 吗 | ❌ 不用（脚本自动装 3.12.10） | ❌ 不用（容器内 apt 安装） | ✅ 需要 Python **3.10+** 和 `python3-venv` |
+| 需要预装 Python 吗 | ❌ 不用（脚本自动装 3.12.10） | ❌ 不用（容器内 apt 安装） | ✅ 需要 Python **3.10 ~ 3.12** 和 `python3-venv` |
 | 需要 root / 管理员吗 | ❌ 不需要（只有放行防火墙那步会弹一次 UAC，可跳过） | ❌ **不需要 root**（走 Termux + proot 容器） | 装 venv 时可能需要 sudo |
 | CPU 架构 | x64 | **ARM64 / aarch64** | x86_64 或 aarch64 |
 | 可用磁盘 | ≥ 4GB（建议 6GB） | ≥ 4GB（装完约 2.5-3GB） | 同左 |
@@ -110,13 +116,17 @@ powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\manga-ocr\install.ps1
 #### 方式 B：手动安装（需要自己装 Python 3.12）
 
 ```bash
-pip install "paddleocr==2.7.3" paddlepaddle==2.6.2 "numpy<2" fastapi uvicorn opencv-python
+pip install "paddleocr==2.7.3" "paddlepaddle==2.6.2" "numpy==1.26.4" "scipy==1.17.1" fastapi uvicorn "opencv-python==4.6.0.66"
 python local-ocr-server.py
 ```
 
-> ⚠️ 版本必须配套：PaddleOCR 2.x + PaddlePaddle **2.6.2** + **numpy 1.x**。
-> 装 PaddlePaddle 3.x、或让 numpy 升到 2.x 都会崩；Python 必须是 3.12（3.13 没有 PaddlePaddle 2.6.2 的安装包）。
-> Windows 下也可直接双击 `restart-ocr.bat`（首次建议「以管理员身份运行」以添加防火墙规则）。
+> ⚠️ 版本必须配套（一键脚本钉的就是这套）：PaddleOCR **2.7.3** + PaddlePaddle **2.6.2** + numpy **1.26.4** +
+> scipy **1.17.1** + opencv-python **4.6.0.66**。装 PaddlePaddle 3.x、或让 numpy 升到 2.x 都会崩；
+> Python 必须是 3.12（3.13 没有 PaddlePaddle 2.6.2 的安装包）。
+> 手机 / Linux 侧的 opencv 用的是 `opencv-python-headless==4.10.0.84`：4.6.0.66 没有 aarch64 的 wheel，
+> 硬装会去编译源码。这是平台差异，不是版本不一致。
+> Windows 下也可直接双击 `restart-ocr.bat`（它会自动用 `%USERPROFILE%\manga-ocr\venv` 里的 Python；
+> 首次建议「以管理员身份运行」以添加防火墙规则）。
 
 #### 方式 C：装在手机上（Android / Termux，进阶）
 
@@ -149,7 +159,12 @@ curl -fsSL https://raw.githubusercontent.com/nihao8602/86-/main/install-termux.s
 
 - **翻译引擎**：选 DeepSeek / 智谱 GLM / 腾讯混元 / 硅基流动，填对应平台的 API Key；或选「本地 Ollama」免费离线翻译
 - **OCR 引擎**：选「本地 OCR（PaddleOCR）」，地址填 `http://127.0.0.1:8000/ocr`
+- **访问令牌**（可选）：服务端设了 `OCR_TOKEN` 环境变量时，这里填同一个值，脚本会带 `X-OCR-Token` 头；不设就留空
+- **清气泡**：面板底部「清气泡」按钮，一键清掉当前页所有译文气泡（连 `.mt-shell` 外壳一起还原，不会残留包裹层）
 - **源语言**：韩文 / 日文 / 英文
+- **术语表**（可选）：每行 `原文=译名`，如 `Elena=艾琳娜`；「上下文页数」0~3（默认 1）决定参考前几页的原文+译文；「自动记人名」会把名字沉淀成固定译名
+- **思考模式**（默认关）：仅对 DeepSeek 官方域生效，打开后更慢更贵，一般不用开
+- **擦除原文再打译文**（默认关）：用克隆底补丁去掉原文字，失败/跨域时自动回退纯白底
 
 ## 手机 / 局域网使用
 
@@ -163,7 +178,8 @@ curl -fsSL https://raw.githubusercontent.com/nihao8602/86-/main/install-termux.s
 ## DeepSeek 模型说明
 
 - `deepseek-chat`：V3，稳定，但官方计划弃用（需迁移到 V4）
-- `deepseek-v4-flash` / `deepseek-v4-pro`：V4 模型默认开启「思考」，批量翻译会先烧大量推理 token 且易超时。脚本已在请求中**自动关闭思考**（`thinking: { type: "disabled" }`），无需手动处理
+- `deepseek-v4-flash` / `deepseek-v4-pro`：V4 模型默认开启「思考」，批量翻译会先烧大量推理 token 且易超时。脚本**默认关闭思考**（`thinking: { type: "disabled" }`），需要时可在面板「处理」里打开「思考模式」
+  - 这个字段**只在接口域名是 `deepseek.com` 时**才加。第三方平台托管的 deepseek 模型可能不认它，硬塞会被拒（400）——脚本按域名判断，不会误伤
 
 ## 免责声明
 
