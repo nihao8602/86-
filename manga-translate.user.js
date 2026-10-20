@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         漫画翻译引擎
 // @namespace    https://github.com/nihao8602/86-
-// @version      7.33.0
-// @description  提速版：全局并发池+OCR限速器 · 分块OCR并行 · 下载/OCR/翻译流水线 · 快重试+超时 · 纯白底气泡完全遮盖原文 · 气泡按像素紧贴原文框不再放大 · 去掉气泡描边 · 翻译引擎预设（混元/硅基流动/智谱GLM） · 拟声词跳过不翻 · 详细日志 · 合并更保守 · 英文强制重翻 · 处理顺序可选 · 手机极速模式 · 设备选择(自动/电脑/手机) · 手机直发原图 · 气泡底缩放 · 翻译回退可用版 · DeepSeek 全系关闭思考 · 面板默认最小化 · 分组默认全折叠 · 面板支持触屏拖动 · 气泡级分组(一句一框) · 网址水印过滤 · 拒答文案不落板 · 思考模式开关 · 擦除原文(克隆底)开关 · 术语表+上下文记忆
+// @version      7.34.0
+// @description  提速版：全局并发池+OCR限速器 · 分块OCR并行(90px重叠) · 下载/OCR/翻译流水线 · 快重试+超时 · 纯白底气泡完全遮盖原文 · 擦除原文(克隆底+边缘羽化)开关 · 气泡按像素紧贴原文框 · 翻译引擎预设(混元/硅基流动/智谱GLM) · 拟声词跳过 · 详细日志 · 合并更保守 · 英文强制重翻 · 处理顺序可选 · 手机极速模式 · 设备选择 · 手机直发原图 · 气泡底缩放 · DeepSeek 全系默认关闭思考 · 思考模式开关 · 面板默认最小化/全折叠 · 气泡级分组(一句一框，按文字块区域检测) · 菱形/四角不被并成一句 · 同行碎片不错误锁定 · 网址水印过滤 · OCR乱读碎片过滤 · 术语表+上下文记忆 · 人名自动音译 · 高清分块OCR开关(更准) · 翻译诊断日志
 // @author       百事比可口好喝
 // @match        *://*/*
 // @run-at       document-end
@@ -38,6 +38,7 @@
         processOrder: savedConfig.processOrder || 'fast',
         waveSize: savedConfig.waveSize || 5,
         ocrRps: savedConfig.ocrRps === undefined ? 3 : savedConfig.ocrRps,
+        ocrChunkHi: savedConfig.ocrChunkHi === undefined ? true : !!savedConfig.ocrChunkHi,   // 高清分块 OCR（local 模式 1000px/块）
         localOcrUrl: savedConfig.localOcrUrl || 'http://127.0.0.1:8000/ocr',
         localOcrToken: savedConfig.localOcrToken || '',   // 服务端设了 OCR_TOKEN 才需要填，留空=不带令牌
         panelZoom: savedConfig.panelZoom || '100',
@@ -63,9 +64,14 @@
         zhipu:       { name: '智谱 GLM（免费额度）', url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4-flash' }
     };
 
-    const CAP_MAX_DIM = { baidu: 3000, 'baidu-direct': 3000, ocrspace: 1400, local: 3000 };
+    // 本地英文 OCR 的分块上限（关闭「高清分块 OCR」时使用）：PaddleOCR 会把过高的切片内部缩放到 ~960px 高，
+    // 字被压小后整行漏识别。实测 720 宽长条图：2400px 切片漏掉 "I SENT YOU THE LINK OVER" 等整句；
+    // 1000px 切片全部识别（只会切成更多块，交给 mergeBlocks 合并）。高清开关打开时 local 用 1000。
+    const CAP_MAX_DIM = { baidu: 3000, 'baidu-direct': 3000, ocrspace: 1400, local: 2400 };
     const JPEG_QUALITY = 0.87;
     const LLM_BATCH_SIZE = 60;
+    const LLM_BATCH_CHARS = 7600;
+    const LLM_RETRY_BATCH_SIZE = 20;
     const WAVE_SIZE = 5;
     const TIMEOUT_IMG = 20000;   // 取图超时 20s
     const TIMEOUT_OCR = 60000;   // OCR 超时 60s
@@ -304,6 +310,10 @@
                         <input id="mt-ocr-rps" type="number" min="0" max="20" step="1" value="3" style="width:58px;padding:5px;background:#333;color:#fff;border:1px solid #555;border-radius:6px;font-size:12px;outline:none;">
                         <span style="font-size:10px;color:#777;flex:1;">次/秒（0=关闭限速器、改用 4 并发；百度免费约 2）</span>
                     </div>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#aaa;padding:2px 0;cursor:pointer;">
+                        <input id="mt-ocr-hi" type="checkbox" style="accent-color:#FF69B4;">
+                        高清分块 OCR（更准；单图 OCR 时间约 ×2，长条小字漫画建议开）
+                    </label>
                 </div>
             </div>
 
@@ -430,6 +440,7 @@
         $('mt-device-mode').value = apiConfig.deviceMode || 'auto';
         $('mt-wave-size').value = apiConfig.waveSize;
         $('mt-ocr-rps').value = apiConfig.ocrRps;
+        $('mt-ocr-hi').checked = !!apiConfig.ocrChunkHi;
         $('mt-local-url').value = apiConfig.localOcrUrl;
         $('mt-local-token').value = apiConfig.localOcrToken || '';
 
@@ -612,6 +623,7 @@
         apiConfig.processOrder = $('mt-process-order').value || 'fast';
         apiConfig.waveSize = parseInt($('mt-wave-size').value, 10) || 5;
         apiConfig.ocrRps = parseInt($('mt-ocr-rps').value, 10) || 0;
+        apiConfig.ocrChunkHi = !!$('mt-ocr-hi').checked;
         apiConfig.localOcrUrl = $('mt-local-url').value.trim() || 'http://127.0.0.1:8000/ocr';
         apiConfig.localOcrToken = $('mt-local-token').value.trim();
         apiConfig.panelZoom = $('mt-panel-zoom').value || '100';
@@ -896,7 +908,9 @@
     function isPhoneDevice() {
         if (apiConfig.deviceMode === 'phone') return true;
         if (apiConfig.deviceMode === 'pc') return false;
-        return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+        if (/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)) return true;
+        // iPadOS 13+ 的 Safari 默认发桌面 Macintosh UA：按触摸点数识别 iPad（7.45）
+        return navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
     }
 
     function blobToDataUrl(blob) {
@@ -1002,49 +1016,88 @@
             }
         }
 
-        // 分块路径（电脑端、非本地模式、或手机端无原图时）：按宽度缩放 + JPEG 重编码
+        // 分块路径（电脑端、非本地模式、或手机端无原图时）：按宽度缩放 + JPEG 重编码。
+        // 分块之间加 OVERLAP 重叠带：刚好压在切分线上的文字行会被横向切碎、上下两块都识别不出（7.45）。
         const fast = !!apiConfig.fastMode;
-        const cap = fast ? 1600 : (CAP_MAX_DIM[apiConfig.ocrMode] || 1400);
-        const jpegQ = fast ? 0.6 : JPEG_QUALITY;
+        // 高清分块：local + 开关打开 → 1000px 高（更准，OCR 时间约 ×2）；关闭 → 2400px（快，长条小字易漏句）
+        const hiChunk = apiConfig.ocrMode === 'local' && apiConfig.ocrChunkHi;
+        const cap = fast ? 1600 : (hiChunk ? 1000 : (CAP_MAX_DIM[apiConfig.ocrMode] || 1400));
+        // 窄长漫画通常本来就小于极速模式宽度上限，此时继续压到 0.60 没有缩放收益，
+        // 只会把白底上的细英文笔画压糊并造成漏字；窄图保留较高质量，大图才使用更强压缩。
+        const jpegQ = fast ? (W <= 1200 ? 0.78 : 0.68) : JPEG_QUALITY;
         const scale = Math.min(1, cap / W);
         const chunkH = Math.max(1, Math.floor(cap / scale));
+        const OVERLAP = Math.min(90, Math.floor(chunkH * 0.1));
+        const stepH = Math.max(1, chunkH - OVERLAP);
 
-        const jobs = [];
-        for (let y0 = 0; y0 < H; y0 += chunkH) {
+        const slices = [];
+        for (let y0 = 0; y0 < H; y0 += stepH) {
             const sh = Math.min(chunkH, H - y0);
-            jobs.push(pools.ocr(() => {
-                if (stopRequested) return null;
-                const pw = Math.max(1, Math.round(W * scale));
-                const ph = Math.max(1, Math.round(sh * scale));
-                const canvas = document.createElement('canvas');
-                canvas.width = pw; canvas.height = ph;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(bitmap, 0, y0, W, sh, 0, 0, pw, ph);
-                const dataUrl = canvas.toDataURL('image/jpeg', jpegQ);
-                return apiConfig.ocrMode === 'baidu' ? baiduOcr(dataUrl)
-                    : apiConfig.ocrMode === 'baidu-direct' ? baiduDirectOcr(dataUrl)
-                    : apiConfig.ocrMode === 'local' ? localOcr(dataUrl)
-                    : ocrSpace(dataUrl);
-            }));
+            slices.push({ y0, sh });
+            if (y0 + sh >= H) break;
         }
+
+        const jobs = slices.map(({ y0, sh }) => pools.ocr(() => {
+            if (stopRequested) return null;
+            const pw = Math.max(1, Math.round(W * scale));
+            const ph = Math.max(1, Math.round(sh * scale));
+            const canvas = document.createElement('canvas');
+            canvas.width = pw; canvas.height = ph;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(bitmap, 0, y0, W, sh, 0, 0, pw, ph);
+            const dataUrl = canvas.toDataURL('image/jpeg', jpegQ);
+            return apiConfig.ocrMode === 'baidu' ? baiduOcr(dataUrl)
+                : apiConfig.ocrMode === 'baidu-direct' ? baiduDirectOcr(dataUrl)
+                : apiConfig.ocrMode === 'local' ? localOcr(dataUrl)
+                : ocrSpace(dataUrl);
+        }));
         const results = await Promise.all(jobs);
         if (stopRequested) return { blocks: [], width: W, height: H };
 
         const blocks = [];
+        function overlapRatio(a, b) {
+            const ix = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+            const iy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+            if (ix <= 0 || iy <= 0) return 0;
+            const inter = ix * iy;
+            return inter / Math.max(1, Math.min(a.w * a.h, b.w * b.h));
+        }
+        function normalizedOcrText(s) {
+            return String(s || '').toLowerCase().replace(/[^a-z0-9\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g, '');
+        }
+        function duplicateIndex(nb) {
+            const nt = normalizedOcrText(nb.originalText);
+            return blocks.findIndex(eb => {
+                const cy1 = eb.y + eb.h / 2, cy2 = nb.y + nb.h / 2;
+                const cx1 = eb.x + eb.w / 2, cx2 = nb.x + nb.w / 2;
+                // 先要求框真正重叠；旧版只比较中心距离，会把同一气泡里相邻两行误删。
+                const overlap = overlapRatio(eb, nb);
+                if (overlap < 0.45) return false;
+                if (Math.abs(cy1 - cy2) > Math.max(eb.h, nb.h) * 0.7 ||
+                    Math.abs(cx1 - cx2) > Math.max(eb.w, nb.w) * 0.65) return false;
+                const et = normalizedOcrText(eb.originalText);
+                return !et || !nt || et === nt || et.includes(nt) || nt.includes(et) || overlap >= 0.78;
+            });
+        }
         results.forEach((raw, i) => {
             if (!raw || !raw.length) return;
-            const y0 = i * chunkH;
+            const y0 = slices[i].y0;
             raw.forEach(b => {
-                blocks.push({
+                const nb = {
                     originalText: b.text,
                     x: b.x / scale,
                     y: b.y / scale + y0,
                     w: b.w / scale,
                     h: b.h / scale
-                });
+                };
+                // 重叠带里的同一行保留信息更完整的版本。必须有实际框重叠，不能仅凭中心接近删行。
+                const di = duplicateIndex(nb);
+                if (di < 0) blocks.push(nb);
+                else if (normalizedOcrText(nb.originalText).length > normalizedOcrText(blocks[di].originalText).length) blocks[di] = nb;
             });
         });
-        return finalizeBlocks(blocks, W, H);
+        // 分块模式也必须带 bitmap，否则气泡级分组会被跳过
+        return finalizeBlocks(blocks, W, H, bitmap);
     }
 
     /* ---------------- 文本判定（#1 噪声/拒答、#2 网址水印） ---------------- */
@@ -1069,17 +1122,24 @@
     }
 
     // 站点水印/网址：命中即丢弃，不翻、不画（#2）
-    const URL_TLD = 'com|net|org|cn|tw|jp|kr|co|cc|xyz|info|top|vip|site|club|app|dev|page|blog|shop|online|manga|biz|us|uk|de|fr|ru|es|nl|br|au|tv|edu|gov|store|live|link|fun|space|website';
+    const URL_TLD = 'com|net|org|cn|tw|jp|kr|cc|xyz|info|top|vip|site|club|app|dev|page|blog|shop|online|manga|biz|uk|de|fr|ru|es|nl|br|au|tv|edu|gov|store|live|link|fun|space|website';
     function isUrlLike(text) {
-        let t = String(text || '').trim().toLowerCase().replace(/\s+/g, '');
-        if (!t) return false;
-        // OCR 常见误识别修正：域名里的 0/o、1/l、3/e 混淆 + .corn/.c0m/.con → .com（仅用于判定，不改原文）
-        const variants = [t, t.replace(/0/g, 'o'), t.replace(/1/g, 'l'), t.replace(/3/g, 'e')]
+        const raw = String(text || '').trim().toLowerCase();
+        if (!raw) return false;
+        // 多词正常句（≥4 个空格分隔词）且没有 http/www/明确域名 → 不当网址。
+        // 旧实现先删光整句空格再匹配，会把 "WAIT. US" 拼成 "wait.us" 误杀正常台词（7.45 修正）。
+        const words = raw.split(/\s+/).filter(Boolean);
+        if (words.length >= 4 && !/(https?:\/\/|www\.|\b[a-z0-9-]{2,}\.(com|net|org|cn|tw|jp|kr|cc|xyz|site|club|top|vip|manga)\b)/.test(raw)) return false;
+        // OCR 常见误识别修正（仅用于判定，不改原文）：.corn/.c0m/.con → .com；0/o、1/l、3/e 混淆
+        const compact = raw.replace(/\s+/g, '');
+        const variants = [compact, compact.replace(/0/g, 'o'), compact.replace(/1/g, 'l'), compact.replace(/3/g, 'e')]
             .map(v => v.replace(/\.corn\b/g, '.com').replace(/\.c0m\b/g, '.com').replace(/\.con\b/g, '.com'));
-        const reBare = new RegExp('(^|[^a-z0-9])([a-z0-9-]{2,}\\.)+(' + URL_TLD + ')(\\.[a-z]{2,})?(\\/|$|[^a-z0-9])');
+        // 原文带空格边界：只认"点后紧跟 TLD"的形态（避免 "wait. us" 拼成 wait.us）
+        const reBareSrc = new RegExp('(^|\\s)([a-z0-9-]{2,}\\.)+(' + URL_TLD + ')(\\.[a-z]{2,})?(\\/|$|\\s)');
+        if (reBareSrc.test(raw)) return true;
         for (const v of variants) {
             if (/^(https?:\/\/|www\.)/.test(v)) return true;
-            if (reBare.test(v)) return true;
+            if (new RegExp('(^|[^a-z0-9])([a-z0-9-]{2,}\\.)+(' + URL_TLD + ')(\\.[a-z]{2,})?(\\/|$|[^a-z0-9])').test(v)) return true;
             if (/^[a-z0-9-]+(\.[a-z0-9-]+)+:\d{2,5}(\/|$)/.test(v)) return true;   // 带端口
         }
         return false;
@@ -1092,66 +1152,135 @@
         return REFUSAL_RE.test(String(text));
     }
 
+    // 不再把“只含一个汉字”当成翻译成功。结合原文长度筛掉明显截断/残缺的回答，交给逐条补翻。
+    function isUsableTranslation(source, translated) {
+        const src = String(source || '').trim();
+        const t = String(translated || '').trim();
+        if (!src || !t || isRefusal(t)) return false;
+        const cn = (t.match(/[\u3400-\u9fff]/g) || []).length;
+        if (!cn) return false;
+        if (apiConfig.sourceLang === 'eng') {
+            const letters = (src.match(/[A-Za-z]/g) || []).length;
+            const words = (src.match(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g) || []).length;
+            const minCn = letters >= 20
+                ? Math.min(18, Math.max(4, Math.floor(letters * 0.16), Math.floor(words * 0.55)))
+                : 1;
+            if (cn < minCn) return false;
+        } else {
+            const sourceChars = (src.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g) || []).length;
+            if (sourceChars >= 10 && cn < Math.min(14, Math.max(3, Math.floor(sourceChars * 0.24)))) return false;
+        }
+        return true;
+    }
+
     /* ---------------- #6 气泡级分组：白色连通域定位气泡 ---------------- */
 
     function rectContains(r, b) {
         return b.x >= r.x - 1 && b.y >= r.y - 1 && b.x + b.w <= r.x + r.w + 1 && b.y + b.h <= r.y + r.h + 1;
     }
 
-    // 缩到最长边 480px 做阈值化 + BFS 连通域，返回候选气泡矩形（bitmap 像素坐标系）
-    function detectBubbles(bitmap, W, H) {
-        const scale = Math.min(1, 480 / Math.max(W, H));
-        const cw = Math.max(1, Math.round(W * scale));
-        const ch = Math.max(1, Math.round(H * scale));
-        const canvas = document.createElement('canvas');
-        canvas.width = cw; canvas.height = ch;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        ctx.drawImage(bitmap, 0, 0, cw, ch);
-        const data = ctx.getImageData(0, 0, cw, ch).data;
-        const n = cw * ch;
-        const mask = new Uint8Array(n);
-        for (let i = 0; i < n; i++) {
-            const o = i * 4;
-            const r = data[o], g = data[o + 1], b = data[o + 2];
-            const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-            // 近白/浅色且低饱和：白气泡（255,255,255）和浅粉/浅黄气泡都算；
-            // 彩色背景（蓝窗、肤色渐变）因饱和度差 > 40 被排除（反重力评审提出的彩色气泡边界）
-            mask[i] = ((r + g + b) / 3 > 205 && mx - mn < 40) ? 1 : 0;
-        }
-        const seen = new Uint8Array(n);
-        const queue = new Int32Array(n);
-        const out = [];
-        const minArea = n * 0.002, maxArea = n * 0.6;
-        for (let i = 0; i < n; i++) {
-            if (!mask[i] || seen[i]) continue;
-            let head = 0, tail = 0;
-            queue[tail++] = i; seen[i] = 1;
-            let minX = cw, minY = ch, maxX = 0, maxY = 0, area = 0;
-            while (head < tail) {
-                const p = queue[head++];
-                const x = p % cw, y = (p / cw) | 0;
-                area++;
-                if (x < minX) minX = x;
-                if (x > maxX) maxX = x;
-                if (y < minY) minY = y;
-                if (y > maxY) maxY = y;
-                if (x > 0) { const q = p - 1; if (mask[q] && !seen[q]) { seen[q] = 1; queue[tail++] = q; } }
-                if (x < cw - 1) { const q = p + 1; if (mask[q] && !seen[q]) { seen[q] = 1; queue[tail++] = q; } }
-                if (y > 0) { const q = p - cw; if (mask[q] && !seen[q]) { seen[q] = 1; queue[tail++] = q; } }
-                if (y < ch - 1) { const q = p + cw; if (mask[q] && !seen[q]) { seen[q] = 1; queue[tail++] = q; } }
+    // 只在 OCR 文字附近建立搜索区。相邻行扩展后的区域会自动合并成一个气泡候选区，
+    // 但长图中没有文字的大片画面不再进入像素扫描，避免整张 720x15560 图片做千万级 BFS。
+    function buildBubbleSearchRegions(blocks, W, H) {
+        const regions = [];
+        const source = (blocks || []).filter(b => b && b.w > 1 && b.h > 1);
+        for (const b of source) {
+            const padX = Math.max(36, Math.min(W * 0.14, b.w * 0.75));
+            const padY = Math.max(52, Math.min(190, b.h * 3.2));
+            let r = {
+                x: Math.max(0, b.x - padX),
+                y: Math.max(0, b.y - padY),
+                x2: Math.min(W, b.x + b.w + padX),
+                y2: Math.min(H, b.y + b.h + padY)
+            };
+            // 合并所有相交搜索区，并从头复查，处理多行文字造成的传递合并。
+            for (let i = 0; i < regions.length;) {
+                const q = regions[i];
+                const overlapX = Math.min(r.x2, q.x2) - Math.max(r.x, q.x);
+                const overlapY = Math.min(r.y2, q.y2) - Math.max(r.y, q.y);
+                if (overlapX >= 0 && overlapY >= 0) {
+                    r = { x: Math.min(r.x, q.x), y: Math.min(r.y, q.y), x2: Math.max(r.x2, q.x2), y2: Math.max(r.y2, q.y2) };
+                    regions.splice(i, 1);
+                    i = 0;
+                } else i++;
             }
-            if (area < minArea || area > maxArea) continue;
-            const bw = maxX - minX + 1, bh = maxY - minY + 1;
-            if (bw < 16 || bh < 16) continue;
-            if (area / (bw * bh) < 0.5) continue;             // 太散：背景白边/白衣服
-            if (bw / bh > 6 || bh / bw > 6) continue;          // 极端长条不是气泡
-            out.push({ x: minX / cw * W, y: minY / ch * H, w: bw / cw * W, h: bh / ch * H });
+            regions.push(r);
         }
-        // 只保留最内层：白底页会整页连通，大矩形会被内部小矩形过滤
-        out.sort((a, b) => a.w * a.h - b.w * b.h);
+        return regions.map(r => ({ x: r.x, y: r.y, w: r.x2 - r.x, h: r.y2 - r.y }));
+    }
+
+    function detectBubbles(bitmap, W, H, blocks) {
+        const regions = buildBubbleSearchRegions(blocks, W, H);
+        const out = [];
+        for (const region of regions) {
+            const scale = Math.min(1, 420 / Math.max(1, region.w), 900 / Math.max(1, region.h));
+            const cw = Math.max(1, Math.round(region.w * scale));
+            const ch = Math.max(1, Math.round(region.h * scale));
+            const canvas = document.createElement('canvas');
+            canvas.width = cw; canvas.height = ch;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            ctx.drawImage(bitmap, region.x, region.y, region.w, region.h, 0, 0, cw, ch);
+            const data = ctx.getImageData(0, 0, cw, ch).data;
+            const n = cw * ch;
+            const mask = new Uint8Array(n);
+            for (let i = 0; i < n; i++) {
+                const o = i * 4;
+                const r = data[o], g = data[o + 1], b = data[o + 2];
+                const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+                mask[i] = ((r + g + b) / 3 > 205 && mx - mn < 40) ? 1 : 0;
+            }
+            const seen = new Uint8Array(n);
+            const queue = new Int32Array(n);
+            const minArea = Math.max(36, n * 0.0005), maxArea = n * 0.9;
+            for (let i = 0; i < n; i++) {
+                if (!mask[i] || seen[i]) continue;
+                let head = 0, tail = 0;
+                queue[tail++] = i; seen[i] = 1;
+                let minX = cw, minY = ch, maxX = 0, maxY = 0, area = 0;
+                while (head < tail) {
+                    const p = queue[head++];
+                    const x = p % cw, y = (p / cw) | 0;
+                    area++;
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                    if (x > 0) { const q = p - 1; if (mask[q] && !seen[q]) { seen[q] = 1; queue[tail++] = q; } }
+                    if (x < cw - 1) { const q = p + 1; if (mask[q] && !seen[q]) { seen[q] = 1; queue[tail++] = q; } }
+                    if (y > 0) { const q = p - cw; if (mask[q] && !seen[q]) { seen[q] = 1; queue[tail++] = q; } }
+                    if (y < ch - 1) { const q = p + cw; if (mask[q] && !seen[q]) { seen[q] = 1; queue[tail++] = q; } }
+                }
+                if (area < minArea || area > maxArea) continue;
+                const bw = maxX - minX + 1, bh = maxY - minY + 1;
+                const fill = area / Math.max(1, bw * bh);
+                if (bw < 14 || bh < 14 || fill < 0.48) continue;
+                if (bw / bh > 7 || bh / bw > 7) continue;
+                const edgeCount = (minX === 0 ? 1 : 0) + (maxX === cw - 1 ? 1 : 0)
+                    + (minY === 0 ? 1 : 0) + (maxY === ch - 1 ? 1 : 0);
+                // 同时碰到两个以上分片边缘的白区通常是页面留白/栏间空白，不是封闭气泡。
+                if (edgeCount >= 2) continue;
+                out.push({
+                    x: region.x + minX / scale,
+                    y: region.y + minY / scale,
+                    w: bw / scale,
+                    h: bh / scale,
+                    fill: fill,
+                    clipped: edgeCount > 0
+                });
+            }
+        }
+        // 重叠搜索区里的重复框只留更完整的一个；内部文字割裂出的碎白块也不应抢走 OCR 行。
+        const valid = out.filter(r => r.w >= W * 0.045 && r.h >= 24);
+        valid.sort((a, b) => (b.w * b.h) - (a.w * a.h));
         const keep = [];
-        for (const r of out) {
-            if (keep.some(k => rectContains(k, r))) continue;
+        for (const r of valid) {
+            const duplicate = keep.some(k => {
+                const ix = Math.min(r.x + r.w, k.x + k.w) - Math.max(r.x, k.x);
+                const iy = Math.min(r.y + r.h, k.y + k.h) - Math.max(r.y, k.y);
+                const inter = ix > 0 && iy > 0 ? ix * iy : 0;
+                return rectContains(k, r) || inter / Math.max(1, Math.min(r.w * r.h, k.w * k.h)) > 0.78;
+            });
+            if (duplicate) continue;
             keep.push(r);
         }
         return keep;
@@ -1168,58 +1297,95 @@
         return (ix * iy) / Math.max(1, b.w * b.h);
     }
 
-    // 同一白色连通域里可能黏着多个气泡（两个椭圆贴边/相交）：按垂直间隔切分，
-    // 每簇一个翻译单元。垂直间隔超过 max(30px, 行高*1.4) 就断开（不同气泡），否则并入。
-    // 水平位置不参与判断：气泡内文字本就居中，碎块左右参差（实测会让"三"单独成簇、译文碎裂）。
+    // 同一白色连通域里可能黏着多个气泡、或菱形/属性面板的四角文字：
+    // 同一视觉行要求水平间距在"词间距级"，上下行要求垂直间距小且水平重叠/中心对齐。
+    // 7.41~7.45 只按垂直距离切分，会把菱形四角的四段英文并成一句（必须在水平方向也约束）。
     function clusterBlocks(members) {
         const sorted = members.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x));
         const clusters = [];
         for (const b of sorted) {
-            const cur = clusters[clusters.length - 1];
-            if (cur) {
-                const gap = b.y - cur.y2;
-                const limit = Math.max(30, Math.max(cur.maxH, b.h) * 1.4);
-                if (gap <= limit && gap >= -limit * 2) {
-                    cur.members.push(b);
-                    cur.maxH = Math.max(cur.maxH, b.h);
-                    cur.x = Math.min(cur.x, b.x);
-                    cur.y = Math.min(cur.y, b.y);
-                    cur.x2 = Math.max(cur.x2, b.x + b.w);
-                    cur.y2 = Math.max(cur.y2, b.y + b.h);
-                    continue;
+            let target = null;
+            for (const g of clusters) {
+                const gW = g.x2 - g.x;
+                const lineH = Math.max(g.maxH, b.h, 12);
+                // ① 同一视觉行：垂直重叠 + 水平间隙小（词间距）
+                const overlapY = Math.min(b.y + b.h, g.y2) - Math.max(b.y, g.y);
+                const hGap = Math.max(0, Math.max(b.x, g.x) - Math.min(b.x + b.w, g.x2));
+                if (overlapY > Math.min(b.h, g.maxH) * 0.4 && hGap <= Math.max(lineH * 2, 36)) { target = g; break; }
+                // ② 上下相邻行：垂直间隙小，且水平重叠或中心对齐
+                const vGap = Math.max(b.y - g.y2, g.y - (b.y + b.h));
+                if (vGap <= Math.max(24, lineH * 1.4)) {
+                    const overlapX = Math.min(b.x + b.w, g.x2) - Math.max(b.x, g.x);
+                    const cx1 = g.x + gW / 2, cx2 = b.x + b.w / 2;
+                    if (overlapX > Math.min(b.w, gW) * 0.15 || Math.abs(cx1 - cx2) <= Math.max(b.w, gW) * 0.7) { target = g; break; }
                 }
             }
-            clusters.push({ members: [b], x: b.x, y: b.y, x2: b.x + b.w, y2: b.y + b.h, maxH: b.h });
+            if (target) {
+                target.members.push(b);
+                target.maxH = Math.max(target.maxH, b.h);
+                target.x = Math.min(target.x, b.x);
+                target.y = Math.min(target.y, b.y);
+                target.x2 = Math.max(target.x2, b.x + b.w);
+                target.y2 = Math.max(target.y2, b.y + b.h);
+            } else {
+                clusters.push({ members: [b], x: b.x, y: b.y, x2: b.x + b.w, y2: b.y + b.h, maxH: b.h });
+            }
         }
         return clusters;
     }
 
-    // 同一气泡里的所有行合并成一个翻译单元；不属于任何气泡的块原样返回。
+    function groupBlocksByBubbleCandidates(blocks, bubbles) {
+        // 一个块可能同时落在大背景白区和真正的小气泡里，优先归到面积更小、包裹更紧的候选。
+        bubbles = bubbles.slice().sort((a, b) => (a.w * a.h) - (b.w * b.h));
+        const owner = new Array(blocks.length).fill(-1);
+        blocks.forEach((b, i) => {
+            let best = -1, bestArea = Infinity;
+            bubbles.forEach((bb, bi) => {
+                const hit = blockInBubble(b, bb);
+                const area = bb.w * bb.h;
+                if (hit >= 0.35 && area < bestArea) { best = bi; bestArea = area; }
+            });
+            owner[i] = best;
+        });
+        const units = [];
+        bubbles.forEach((bb, bi) => {
+            const idxs = [];
+            owner.forEach((v, i) => { if (v === bi) idxs.push(i); });
+            if (!idxs.length) return;
+            // 开放式气泡或相连的白底会把相隔很远的两句归到同一个候选白区。
+            // 先按实际文字行的几何邻近性拆开，再逐簇决定是否锁定为一句。
+            const indexByBlock = new Map(idxs.map(i => [blocks[i], i]));
+            for (const cluster of clusterBlocks(idxs.map(i => blocks[i]))) {
+                const members = cluster.members;
+                const centers = members.map(b => b.y + b.h / 2).sort((a, b) => a - b);
+                const lineH = Math.max(...members.map(b => b.h));
+                const oneVisualLine = centers[centers.length - 1] - centers[0] <= lineH * 0.65;
+                if (members.length < 2 || oneVisualLine) {
+                    members.forEach(b => { owner[indexByBlock.get(b)] = -1; });
+                    continue;
+                }
+                units.push({
+                    originalText: joinSortedBlocks(members),
+                    x: cluster.x, y: cluster.y, w: cluster.x2 - cluster.x, h: cluster.y2 - cluster.y,
+                    avgH: lineH,
+                    _members: members,
+                    _locked: true
+                });
+            }
+        });
+        blocks.forEach((b, i) => {
+            if (owner[i] < 0) units.push(Object.assign({}, b, { avgH: b.h, _members: [b], _locked: false }));
+        });
+        return units;
+    }
+
+    // 同一可靠气泡里的多行合并成一个翻译单元；单行伪气泡与未归属块交给后续保守行合并。
     // 返回 null 表示整页没有可靠气泡（白底页等），由调用方降级到 mergeBlocks。
     function groupByBubbles(blocks, bitmap, W, H) {
         let bubbles = [];
-        try { bubbles = detectBubbles(bitmap, W, H); } catch (e) { bubbles = []; }
+        try { bubbles = detectBubbles(bitmap, W, H, blocks); } catch (e) { bubbles = []; }
         if (!bubbles.length) return null;
-        const used = new Array(blocks.length).fill(false);
-        const units = [];
-        for (const bb of bubbles) {
-            const idxs = [];
-            blocks.forEach((b, i) => {
-                if (!used[i] && blockInBubble(b, bb) >= 0.4) idxs.push(i);
-            });
-            if (!idxs.length) continue;
-            idxs.forEach(i => { used[i] = true; });
-            const clusters = clusterBlocks(idxs.map(i => blocks[i]));
-            for (const g of clusters) {
-                units.push({
-                    originalText: joinLines(g.members.map(m => m.originalText)),
-                    x: g.x, y: g.y, w: g.x2 - g.x, h: g.y2 - g.y,
-                    bubbleUnit: true
-                });
-            }
-        }
-        blocks.forEach((b, i) => { if (!used[i]) units.push(Object.assign({}, b, { _orphan: true })); });
-        return units;
+        return groupBlocksByBubbleCandidates(blocks, bubbles);
     }
 
     /* ---------------- #4 擦除原文：克隆底 + 白色膨胀去字 + 轻模糊 ---------------- */
@@ -1334,103 +1500,160 @@
 
     // OCR 乱读：源语言是英文时，台词里出现中日韩文字基本必是误读（气泡颈部曲线、装饰线、水印）。
     // 注意：不能对日文源用"汉字+假名混杂"规则 —— 日文本身就是汉字+假名，会把正常台词全丢掉。
-    function isCjkForSource(text) {
-        if (apiConfig.sourceLang !== 'eng') return false;
-        return /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(String(text || ''));
+    // 英文源清洗：英文句子里混入少量 OCR 误读的中日韩字符（省略号/线条被认成汉字）时，
+    // 剔除这些乱码字符、保留英文；只有整块几乎没有有效英文时才丢弃（7.45：不再整句连坐）。
+    function cleanOrFilterBySource(b) {
+        let t = String(b.originalText || '').trim();
+        if (!t) return false;
+        if (apiConfig.sourceLang === 'eng') {
+            const stripped = t.replace(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+/g, ' ').replace(/\s+/g, ' ').trim();
+            const engLetters = (stripped.match(/[A-Za-z]/g) || []).length;
+            if (engLetters >= 2 || SHORT_KEEP.has(stripped.toUpperCase())) {
+                b.originalText = stripped;
+                return true;
+            }
+            return false;
+        }
+        return true;
     }
 
-    // 孤立小块：气泡颈部/边缘线被误识别的典型形态（框很小 + 文本很短）；白名单短词不误杀。
+    // 孤立小块：宽高必须【同时】很小（用 &&，避免误杀高度 <26px 的正常单行英文）；
+    // 含 3 个以上连续字母 / 2 个以上 CJK 的短词也直接保留（"SURE"/"AREA"/"CHECK" 这类真词不丢）。
     function isTinyFragment(b) {
         const t = String(b.originalText || '').replace(/\s+/g, '');
         if (!t) return true;
-        if (t.length > 6) return false;
+        if (/[A-Za-z]{3,}/.test(t) || /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]{2,}/.test(t)) return false;
         if (SHORT_KEEP.has(t.toUpperCase())) return false;
-        return (b.w < 40 || b.h < 26);
+        return (b.w < 28 && b.h < 18);
     }
 
     function finalizeBlocks(blocks, W, H, bitmap) {
         if (!blocks || !blocks.length) return { blocks: [], width: W, height: H };
-        // #6 先按「气泡」分组：同一气泡里的多行合成为一个翻译单元；无气泡页返回 null
+        // 1. 合并前先清洗单块乱码与极小噪点：避免一颗老鼠屎让合并后的整段台词被连坐丢弃
+        const pre = [];
+        for (const b of blocks) {
+            if (!cleanOrFilterBySource(b)) { addLog('过滤', '丢弃纯乱码块: ' + String(b.originalText).slice(0, 24)); continue; }
+            if (isTinyFragment(b)) { addLog('过滤', '丢弃微小碎片: ' + String(b.originalText).slice(0, 20) + ' ' + Math.round(b.w) + 'x' + Math.round(b.h)); continue; }
+            pre.push(b);
+        }
+        if (!pre.length) return { blocks: [], width: W, height: H };
+
+        // 2. 气泡分组（无气泡页返回 null，降级到行合并）
         let grouped = null;
         if (bitmap) {
-            try { grouped = groupByBubbles(blocks, bitmap, W, H); }
+            try { grouped = groupByBubbles(pre, bitmap, W, H); }
             catch (e) { addLog('气泡', '气泡检测失败，回退行合并: ' + (e && e.message || e), 'warn'); }
         }
-        // 不在任何气泡内的孤立小块：多半是气泡颈部/装饰线误识别，合并前先剔掉（7.42）
+        // 3. 气泡单元已经是一句，绝不能再与别的区域二次合并；只保守合并未归属气泡的 OCR 行。
+        // 旧版在这里对全部结果 mergeBlocks(..., true)，等于把前一步的分区重新拆掉，
+        // 属性面板四角文字会沿着中间标签逐步串成覆盖整图的一个大框。
+        let merged;
         if (grouped) {
-            grouped = grouped.filter(b => {
-                if (b._orphan && isTinyFragment(b)) {
-                    addLog('过滤', '丢弃气泡外小块: ' + String(b.originalText).slice(0, 20));
-                    return false;
-                }
-                return true;
-            });
+            const locked = grouped.filter(b => b._locked);
+            const loose = grouped.filter(b => !b._locked);
+            merged = locked.concat(mergeBlocks(loose, false));
+            merged.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+        } else {
+            merged = mergeBlocks(pre, false);
         }
-        // 未归属块再由 mergeBlocks 兜底；气泡单元带 bubbleUnit 标记，不会被拆开/吞并
-        const merged = mergeBlocks(grouped || blocks, true);
+
         const kept = [];
         for (const b of merged) {
+            if (!cleanOrFilterBySource(b)) { addLog('过滤', '丢弃乱码块: ' + String(b.originalText).slice(0, 24)); continue; }
             if (isSfx(b.originalText)) continue;
             if (isNoiseText(b.originalText)) { addLog('过滤', '丢弃疑似噪声碎片: ' + String(b.originalText).slice(0, 24)); continue; }
-            // 英文源却出现中日韩文字：气泡曲线/装饰被 OCR 读成字（7.42）
-            if (isCjkForSource(b.originalText)) { addLog('过滤', '丢弃乱读文字: ' + String(b.originalText).slice(0, 24)); continue; }
-            // 小块 + 短文本：气泡颈部误读（7.42）
-            if (isTinyFragment(b)) { addLog('过滤', '丢弃微小碎片: ' + String(b.originalText).slice(0, 20) + ' ' + Math.round(b.w) + 'x' + Math.round(b.h)); continue; }
             if (isUrlLike(b.originalText)) { addLog('过滤', '丢弃网址水印: ' + String(b.originalText).slice(0, 40)); continue; }
             kept.push(b);
         }
         return { blocks: kept, width: W, height: H };
     }
 
-    function mergeBlocks(blocks, relax) {
-        if (!blocks || blocks.length < 2) return blocks;
-        const sorted = blocks.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x));
-        const groups = [];
-        for (const b of sorted) {
-            const lineH = Math.max(b.h, 1);
-            // 气泡单元是「一句一框」的成品，直接独立成组，不参与合并（#6）
-            if (b.bubbleUnit) {
-                groups.push({ texts: [b.originalText], x: b.x, y: b.y, w: b.w, h: b.h, avgH: b.h, bubbleUnit: true });
-                continue;
-            }
-            let target = null;
-            for (const g of groups) {
-                if (g.bubbleUnit) continue;
-                // 高度差异太大（如大字拟声词 vs 正文小字）不合并，避免拟声词把长句吞掉
-                const hRatio = Math.max(b.h, g.avgH) / Math.max(1, Math.min(b.h, g.avgH));
-                if (hRatio > 1.8) continue;
-                // ① 同一行被切成左右两块：垂直高度重叠 + 水平间隙小 → 合并。
-                // 旧版只按 y-gap 判断，行内碎片 gap ≈ -行高 会被 -maxGap 直接拒掉，永远合不上。
-                const overlapY = Math.min(b.y + b.h, g.y + g.h) - Math.max(b.y, g.y);
-                if (overlapY > Math.min(lineH, g.avgH) * 0.5) {
-                    const hGap = Math.max(0, Math.max(b.x, g.x) - Math.min(b.x + b.w, g.x + g.w));
-                    if (hGap < Math.max(lineH, g.avgH) * 1.5) { target = g; break; }
-                }
-                // ② 上下相邻行：行距放宽到 max(10, 行高*1.2)，否则大行距/斜体字永远合并不上
-                const gap = b.y - (g.y + g.h);
-                const maxGap = relax ? Math.max(10, Math.max(lineH, g.avgH) * 1.2) : Math.max(6, lineH * 0.6);
-                if (gap > maxGap || gap < -maxGap) continue;
-                const overlapX = Math.min(b.x + b.w, g.x + g.w) - Math.max(b.x, g.x);
-                const minW = Math.min(b.w, g.w);
-                if (overlapX > Math.min(minW * 0.5, 40)) { target = g; break; }
-            }
-            if (target) {
-                target.texts.push(b.originalText);
-                target.avgH = (target.avgH * (target.texts.length - 1) + b.h) / target.texts.length;
-                const nx = Math.min(target.x, b.x);
-                const ny = Math.min(target.y, b.y);
-                const nx2 = Math.max(target.x + target.w, b.x + b.w);
-                const ny2 = Math.max(target.y + target.h, b.y + b.h);
-                target.x = nx; target.y = ny;
-                target.w = nx2 - nx; target.h = ny2 - ny;
+    // 把多行/多词块拼成通顺句子：先按视觉行分组（中心 y 相近），行内按 x 排序，行间按 y 排序。
+    // 旧实现直接按 y 排序后 join，同一行被切成左右两块时右侧块会先入组，语序就颠倒了（7.45）。
+    function joinSortedBlocks(members) {
+        if (!members || !members.length) return '';
+        const byY = members.slice().sort((a, b) => (a.y + a.h / 2) - (b.y + b.h / 2));
+        const lines = [];
+        for (const m of byY) {
+            const cy = m.y + m.h / 2;
+            const last = lines[lines.length - 1];
+            // OCR 字框可能把首行高度估得偏大；用较矮行作为阈值，避免相邻两行被当成同一行按 x 重排。
+            if (last && Math.abs(cy - last.cy) <= Math.min(last.maxH, m.h) * 0.55) {
+                last.items.push(m);
+                last.maxH = Math.max(last.maxH, m.h);
+                last.cy = (last.cy * (last.items.length - 1) + cy) / last.items.length;
             } else {
-                groups.push({ texts: [b.originalText], x: b.x, y: b.y, w: b.w, h: b.h, avgH: b.h });
+                lines.push({ cy, maxH: m.h, items: [m] });
             }
         }
+        return joinLines(lines.map(line => {
+            line.items.sort((a, b) => a.x - b.x);
+            return joinLines(line.items.map(x => x.originalText));
+        }));
+    }
+
+    // 判断两组是否属于同一段：同行左右相邻，或上下相邻且水平重叠/中心对齐（居中排版）
+    function canMergeGroup(g, b, relax) {
+        const lineH = Math.max(b.avgH || b.h, g.avgH || g.h, 12);
+        const hRatio = Math.max(b.avgH || b.h, g.avgH || g.h) / Math.max(1, Math.min(b.avgH || b.h, g.avgH || g.h));
+        if (hRatio > 2.1) return false;
+        // ① 同一行被切成左右两块：水平间隙必须是词间距级（收紧，避免菱形左右角被并成一句）
+        const overlapY = Math.min(b.y + b.h, g.y + g.h) - Math.max(b.y, g.y);
+        if (overlapY > Math.min(b.h, g.h) * 0.35) {
+            const hGap = Math.max(0, Math.max(b.x, g.x) - Math.min(b.x + b.w, g.x + g.w));
+            if (hGap <= Math.max(lineH * 1.6, 32)) return true;
+        }
+        // ② 上下相邻行：要求真正的水平重叠，或按较窄行/字号严格居中。
+        // 不能按较宽行的 0.7 倍判断，否则图表左右角标签会被中间长标签吸进去，并发生链式大合并。
+        const vGap = Math.max(b.y - (g.y + g.h), g.y - (b.y + b.h));
+        const maxGap = relax ? Math.max(16, lineH * 1.25) : Math.max(9, lineH * 0.8);
+        if (vGap > maxGap) return false;
+        const overlapX = Math.min(b.x + b.w, g.x + g.w) - Math.max(b.x, g.x);
+        const minW = Math.min(b.w, g.w);
+        const cx1 = g.x + g.w / 2, cx2 = b.x + b.w / 2;
+        const centerAligned = Math.abs(cx1 - cx2) <= Math.max(lineH * 2.2, minW * 0.35);
+        if (!(overlapX > Math.min(minW * 0.28, 24) || centerAligned)) return false;
+        const unionW = Math.max(g.x + g.w, b.x + b.w) - Math.min(g.x, b.x);
+        const maxW = Math.max(g.w, b.w);
+        return unionW <= Math.max(maxW * 1.45, maxW + lineH * 3);
+    }
+
+    // 多遍收敛合并：单遍扫描漏合并会导致一句话碎成多块；最多 10 轮防死循环。
+    function mergeBlocks(blocks, relax) {
+        if (!blocks || blocks.length < 2) return blocks;
+        let groups = blocks.map(b => ({
+            x: b.x, y: b.y, w: b.w, h: b.h,
+            avgH: b.avgH || b.h,
+            members: b._members ? b._members.slice() : [{ originalText: b.originalText, x: b.x, y: b.y, w: b.w, h: b.h }]
+        }));
+        let changed = true, guard = 0;
+        while (changed && guard++ < 10) {
+            changed = false;
+            groups.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+            const next = [];
+            for (const b of groups) {
+                let target = null;
+                for (const g of next) { if (canMergeGroup(g, b, relax)) { target = g; break; } }
+                if (target) {
+                    const total = target.members.length + b.members.length;
+                    target.avgH = (target.avgH * target.members.length + b.avgH * b.members.length) / total;
+                    target.members.push(...b.members);
+                    const nx = Math.min(target.x, b.x);
+                    const ny = Math.min(target.y, b.y);
+                    const nx2 = Math.max(target.x + target.w, b.x + b.w);
+                    const ny2 = Math.max(target.y + target.h, b.y + b.h);
+                    target.x = nx; target.y = ny; target.w = nx2 - nx; target.h = ny2 - ny;
+                    changed = true;
+                } else {
+                    next.push(b);
+                }
+            }
+            groups = next;
+        }
         return groups.map(g => ({
-            originalText: joinLines(g.texts),
+            originalText: joinSortedBlocks(g.members),
             x: g.x, y: g.y, w: g.w, h: g.h,
-            bubbleUnit: !!g.bubbleUnit
+            avgH: g.avgH
         }));
     }
 
@@ -1650,7 +1873,15 @@
     async function translateInBatches(flatBlocks) {
         transTotal += flatBlocks.length;
         const batches = [];
-        for (let i = 0; i < flatBlocks.length; i += LLM_BATCH_SIZE) batches.push(flatBlocks.slice(i, i + LLM_BATCH_SIZE));
+        let current = [], chars = 0;
+        for (const b of flatBlocks) {
+            const n = String(b.originalText || '').length + 12;
+            if (current.length && (current.length >= LLM_BATCH_SIZE || chars + n > LLM_BATCH_CHARS)) {
+                batches.push(current); current = []; chars = 0;
+            }
+            current.push(b); chars += n;
+        }
+        if (current.length) batches.push(current);
         await Promise.all(batches.map(batch => pools.ll(() => translateBlocks(batch)).then(() => {
             const done = batch.filter(b => b.chineseText).length;
             transDone += done;
@@ -1860,6 +2091,8 @@
         // 旧方案是「|| 拼接 → 按顺序填空」：模型只要少返/多返一句，丢失点之后所有译文整体错位一格，
         // 每句都翻对了却贴进错误的气泡，比翻错更难察觉；台词本身含 || 时对齐必然崩。
         const numbered = blocks.map((b, i) => '#' + (i + 1) + ' ' + b.originalText).join('\n');
+        // 诊断日志（7.49）：记录本批送审的原文，与模型返回对照，区分"OCR 识别错"与"翻译漏"
+        addLog('翻译', '送审 ' + blocks.length + ' 段: ' + blocks.map((b, i) => '#' + (i + 1) + ' ' + String(b.originalText).replace(/\s+/g, ' ').slice(0, 45)).join(' | ').slice(0, 1000));
         const glossary = buildGlossarySnippet();
         const context = buildContextSnippet();
         // #5 上下文注入位置：规则之后、输出格式之前（输出格式必须紧邻台词，编号对齐才稳）
@@ -1874,55 +2107,71 @@
         let sawRefusal = false;
         try {
             const reply = await callLLM(prompt, apiConfig.aiKey);
+            // 诊断日志（7.49）：模型原始返回（截断到 900 字符）
+            addLog('翻译', '模型返回 ' + String(reply || '').length + ' 字符: ' + String(reply || '').replace(/\s+/g, ' ').slice(0, 900));
             const map = parseNumberedLines(reply);
             if (map) {
                 blocks.forEach((b, i) => {
                     const t = map.get(i + 1);
-                    // 只接受真正的中文：模型把英文原样吐回来时宁可当缺失，交给逐条补翻。
-                    // #1 拒答/解释文案（"不是一句完整的话…"）不能当译文，识别出来直接判失败。
-                    if (t && isRefusal(t)) { b.chineseText = ''; b.failed = true; sawRefusal = true; return; }
-                    b.chineseText = (t && /[\u4e00-\u9fff]/.test(t)) ? t : '';
+                    // 英文原样返回、拒答，以及相对原文明显过短的截断回答都交给逐条补翻。
+                    if (t && isRefusal(t)) sawRefusal = true;
+                    b.chineseText = isUsableTranslation(b.originalText, t) ? t.trim() : '';
                 });
                 const filled = blocks.filter(b => b.chineseText).length;
                 if (filled < blocks.length) addLog('翻译', '编号回填 ' + filled + '/' + blocks.length, 'warn');
             } else {
                 blocks.forEach(b => { b.chineseText = ''; });
-                addLog('翻译', '编号格式解析失败，改为逐条补翻', 'warn');
+                addLog('翻译', '编号格式解析失败，改为单轮批量补翻', 'warn');
             }
         } catch (e) {
             blocks.forEach(b => { b.chineseText = ''; });
-            addLog('翻译', '批量翻译失败，改为逐条补翻: ' + (e && e.message || e), 'warn');
+            addLog('翻译', '主批次失败，改为单轮批量补翻: ' + (e && e.message || e), 'warn');
         }
         if (sawRefusal) addLog('翻译', '识别到拒答文案，已排除（不落板）', 'warn');
 
-        // 缺的逐条补翻，最多两轮。这里不能走 pools.ll：translateBlocks 本身已经占着 ll 池的槽位，
-        // 再向同一个池申请会自锁。改用独立的小并发窗口（mapLimit）。
+        // 诊断日志（7.49）：主批次未译出的段（原文），便于定位是识别问题还是翻译问题
+        const missNow = blocks.filter(b => !b.chineseText);
+        if (missNow.length) {
+            addLog('翻译', '主批次未译出 ' + missNow.length + ' 段: ' + missNow.map(b => '#' + (blocks.indexOf(b) + 1) + ' ' + String(b.originalText).replace(/\s+/g, ' ').slice(0, 50)).join(' | ').slice(0, 900), 'warn');
+        }
+        // 缺失项只做一轮批量补翻，每次最多 20 条；避免旧版每条单独请求、失败后再来第二轮。
+        // 这里不能走 pools.ll：translateBlocks 本身已经占着 ll 池的槽位，改用独立的双并发窗口。
         miss = blocks.filter(b => !b.chineseText).length;
-        for (let round = 0; round < 2 && miss > 0; round++) {
-            // 已被判为拒答（b.failed）的块不再重试：再问一次大概率还是拒答，白费 1~2 次 API 往返
-            const todo = blocks.filter(b => !b.chineseText && !b.failed);
-            const got = await mapLimit(todo, 3, async b => {
+        if (miss > 0) {
+            const todo = blocks.filter(b => !b.chineseText);
+            const retryBatches = [];
+            for (let i = 0; i < todo.length; i += LLM_RETRY_BATCH_SIZE) retryBatches.push(todo.slice(i, i + LLM_RETRY_BATCH_SIZE));
+            const got = await mapLimit(retryBatches, 2, async batch => {
                 try {
-                    const r = await callLLM('把这句话翻译成中文，只返回中文译文，不要解释、不要输出英文：' + b.originalText, apiConfig.aiKey);
-                    const t = (r || '').trim();
-                    if (t && isRefusal(t)) { b.failed = true; return 0; }   // #1 拒答文案不落板
-                    if (t && /[\u4e00-\u9fff]/.test(t)) { b.chineseText = t; return 1; }
+                    const retryNumbered = batch.map((b, i) => '#' + (i + 1) + ' ' + b.originalText).join('\n');
+                    const reply = await callLLM('下面是漫画 OCR 得到的句子或片段。逐条翻译成自然中文；即使片段不完整也给出最合理译文，'
+                        + '不要拒答、不要解释、不要遗漏信息。输出必须一行一条，以相同的 #[序号] 开头：\n' + retryNumbered, apiConfig.aiKey);
+                    const map = parseNumberedLines(reply);
+                    if (!map) return 0;
+                    let fixed = 0;
+                    batch.forEach((b, i) => {
+                        const t = map.get(i + 1);
+                        if (isUsableTranslation(b.originalText, t)) { b.chineseText = t.trim(); fixed++; }
+                    });
+                    return fixed;
                 } catch (e) { }
                 return 0;
             });
             const fixed = got.reduce((a, b) => a + b, 0);
             miss = blocks.filter(b => !b.chineseText).length;
-            if (fixed) addLog('翻译', '补翻 ' + fixed + ' 条（第 ' + (round + 1) + ' 轮）');
-            if (!fixed) break;
+            if (fixed) addLog('翻译', '单轮批量补翻 ' + fixed + ' 条');
         }
-        if (miss) addLog('翻译', '仍有 ' + miss + '/' + blocks.length + ' 段未译出，将显示为空', 'error');
+        if (miss) {
+            addLog('翻译', '仍有 ' + miss + '/' + blocks.length + ' 段未译出，将显示为空: ' + blocks.filter(b => !b.chineseText).map(b => String(b.originalText).replace(/\s+/g, ' ').slice(0, 50)).join(' | ').slice(0, 900), 'error');
+        }
 
         // #5 记下本批「原文 / 译文」作为后续页的参考上下文；异步提取词条（不阻塞出图）
         const okBlocks = blocks.filter(b => b.originalText && b.chineseText);
         if (okBlocks.length) {
             pushCtxMemory(okBlocks.map(b => b.originalText).join(' / '), okBlocks.map(b => b.chineseText).join(' / '));
             const srcAll = okBlocks.map(b => b.originalText).join('\n');
-            maybeExtractGlossary(srcAll, okBlocks[0].chineseText);
+            const cnAll = okBlocks.map(b => b.chineseText).join('\n');
+            maybeExtractGlossary(srcAll, cnAll);
         }
         addLog('翻译', '完成 ' + (Date.now() - t0) + 'ms');
         return blocks;
@@ -1967,8 +2216,8 @@
             wrapper.appendChild(img);
         }
 
-        // 极小外扩（约 2~6px），只兜底盖住字迹边缘，不再按百分比放大
-        const PAD = Math.max(2, Math.round(Math.min(refW, refH) * 0.004));
+        // 适当加大白底外扩边距（至少 6px），彻底盖住 OCR 框边缘露出的半截英文字母（7.45）
+        const PAD = Math.max(6, Math.round(Math.min(refW, refH) * 0.008));
         // 气泡背景缩放（只缩白底框，不动字号），默认 100%
         const bscale = (parseInt(apiConfig.bubbleScale || '100', 10) / 100) || 1;
 
