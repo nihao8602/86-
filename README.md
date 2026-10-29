@@ -6,11 +6,15 @@
 
 浏览器用户脚本 + 本地 OCR 服务：自动识别网页漫画里的文字（韩文 / 日文 / 英文），用大模型翻译成中文，并在原文上覆盖白底气泡。
 
-> 当前版本：**7.34.0**
+> 当前版本：**7.42.0**
 
 ## 功能特性
 
 - 🖼️ 自动识别漫画图片文字：韩文 / 日文 / 英文；**气泡级分组**（同一气泡里的多行合成一句翻译，不再拆成碎片）
+- 🧩 **内置免部署 OCR**（借鉴的 xxx 翻译）：YOLO 检测文字框 + Tesseract 逐行识别，全部跑在浏览器里，首次点按钮下载约 10MB 模型，下载时校验完整性、坏了会自动重下，之后离线可用；适合不想装 Python 的场合
+- 📐 **漫画排版引擎**：中英混排断行、避标点行首、孤字行合并、按气泡面积自适应字号
+- 🎨 **三种擦除方式**：本地像素滤波（快）/ 框内主色填充（彩色气泡更贴合）/ 模型擦除（接本地 LaMa 服务，质量最好但每块约 3 秒）
+- 🖼️ **可选 Canvas 整图重绘**：把整页合成一张图再显示，排版更还原、缩放不错位
 - 🌐 多种翻译引擎：DeepSeek / 智谱 GLM / 腾讯混元 / 硅基流动 / 本地 Ollama（免费离线）
 - 🏠 本地 OCR（PaddleOCR），无云端配额限制；也可用百度 / ocr.space
 - 🔍 高清分块 OCR 开关（默认开）：长条小字漫画识别更准；关掉后 OCR 约快一倍
@@ -37,10 +41,20 @@ manga-translate/
 ├── install.ps1               # Windows 一键部署主脚本（install.cmd 会调用它）
 ├── install-termux.sh         # 手机（Android/Termux）与 Linux 一键部署脚本
 ├── local-ocr-server.py       # 本地 OCR 服务（PaddleOCR，默认监听 0.0.0.0:8000；可用 OCR_HOST / OCR_PORT / OCR_TOKEN 覆盖）
+├── local-inpaint-server.py   #（可选）本地擦除服务（LaMa ONNX，默认 127.0.0.1:8001；模型约 198MB）
 ├── restart-ocr.bat           # 一键重启 OCR 服务（含防火墙放行 8000）
 ├── setup-ollama-lan.bat      #（可选）让 Ollama 局域网可访问
 └── baidu-ocr-proxy.js        #（可选）百度 OCR Cloudflare 代理
 ```
+
+## iOS 用户注意
+
+模型下载依赖浏览器正确处理二进制响应。实测：
+
+- **Safari + Userscripts**：正常
+- **Gear 等第三方浏览器**：会把响应重新编码（131072 字节变成 237290 字符），模型校验必然失败
+
+iOS 上请优先用 Safari + Userscripts。
 
 ## 环境要求（安装前先对号入座）
 
@@ -128,6 +142,25 @@ python local-ocr-server.py
 > 硬装会去编译源码。这是平台差异，不是版本不一致。
 > Windows 下也可直接双击 `restart-ocr.bat`（它会自动用 `%USERPROFILE%\manga-ocr\venv` 里的 Python；
 > 首次建议「以管理员身份运行」以添加防火墙规则）。
+
+#### 方式 D：擦除服务（可选，只有想用「模型擦除」才需要）
+
+**不装也能用**——擦除方式默认是「本地像素滤波」，不需要任何服务。只有想让擦除质量更好（渐变底、彩色气泡、字压在图案上）才装这个。
+
+依赖很小（onnxruntime + opencv + fastapi），和 OCR 服务**互不干扰**，跑在另一个端口：
+
+```bash
+pip install onnxruntime opencv-python fastapi uvicorn numpy
+python local-inpaint-server.py --download-model   # 只需一次，约 198MB
+python local-inpaint-server.py                    # 默认 127.0.0.1:8001
+```
+
+然后面板里「设置 → 显示 → 擦除方式」选「模型擦除」，地址填 `http://127.0.0.1:8001/inpaint`。
+
+- 想局域网/手机也能用：`python local-inpaint-server.py --host 0.0.0.0`
+- 端口冲突：`--port 8010`
+- 模型地址可换镜像：`--url <地址>`，或环境变量 `LAMA_MODEL_URL`
+- 服务没起 / 连不上时会**自动回退**到本地像素滤波，不影响主流程
 
 #### 方式 C：装在手机上（Android / Termux，进阶）
 
