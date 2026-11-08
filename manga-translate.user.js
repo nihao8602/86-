@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         漫画翻译引擎
 // @namespace    https://github.com/nihao8602/86-
-// @version      7.42.0
+// @version      7.44.0
 // @description  提速版：全局并发池+OCR限速器 · 分块OCR并行(90px重叠) · 下载/OCR/翻译流水线 · 快重试+超时 · 纯白底气泡完全遮盖原文 · 擦除原文(克隆底+边缘羽化/主色填充/模型擦除)开关 · 气泡按像素紧贴原文框 · 翻译引擎预设(混元/硅基流动/智谱GLM) · 拟声词跳过 · 详细日志 · 合并更保守 · 英文强制重翻 · 处理顺序可选 · 手机极速模式 · 设备选择 · 手机直发原图 · 气泡底缩放 · DeepSeek 全系默认关闭思考 · 思考模式开关 · 面板默认最小化/全折叠 · 气泡级分组(一句一框，按文字块区域检测) · 菱形/四角不被并成一句 · 同行碎片不错误锁定 · 网址水印过滤 · OCR乱读碎片过滤 · 术语表+上下文记忆 · 人名自动音译 · 面板三页签(开始/设置/日志) · 章节进度看板(取图/OCR/翻译) ·【7.52】内置 YOLO+Tesseract 免部署 OCR 引擎(可一键下载模型) · 漫画排版引擎(字号自适应/中英混排断行/避头尾/孤字行合并) · Canvas 整图重绘渲染 · 主色反衬配色
 // @author       百事比可口好喝
 // @match        *://*/*
@@ -61,8 +61,8 @@
             const v = savedConfig.builtinModelBase;
             const GH = 'https://raw.githubusercontent.com/nihao8602/86-/main/models';
             if (!v) return GH;
-            // 老配置里的自建地址会烧自己服务器流量，自动迁到 GitHub
-            if (v.indexOf('cdn.860286.xyz/userscript/models') >= 0) return GH;
+            // 旧版本的默认地址（已废弃）自动迁到 GitHub；用户自己填的其它地址原样保留
+            if (v.indexOf('/userscript/models') >= 0) return GH;
             if (v.indexOf('cdn.jsdelivr.net/gh/nihao8602') >= 0) return GH;
             return v;
         })(),
@@ -2386,13 +2386,31 @@
         return out.buffer;
     }
 
+    // 统一从 GM_xmlhttpRequest 的响应里取出「文本」。
+    // 各家脚本管理器差别很大：有的给 responseText，有的只有 response，
+    // 还有的把文本塞在 ArrayBuffer/Uint8Array 里，甚至 responseText 是空串而内容在 response。
+    function pickResponseText(res) {
+        if (!res) return '';
+        if (typeof res.responseText === 'string' && res.responseText.length) return res.responseText;
+        if (typeof res.response === 'string' && res.response.length) return res.response;
+        try {
+            if (res.response instanceof ArrayBuffer) return new TextDecoder('utf-8').decode(res.response);
+        } catch (e) { }
+        try {
+            if (res.response && typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(res.response)) {
+                return new TextDecoder('utf-8').decode(res.response);
+            }
+        } catch (e) { }
+        return '';
+    }
+
     function fetchText(url) {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'GET', url, responseType: 'text', timeout: 180000,
                 onload: r => {
                     if (!(r.status >= 200 && r.status < 300)) { reject(new Error('HTTP ' + r.status + ' @ ' + url)); return; }
-                    const t = r.responseText;
+                    const t = pickResponseText(r);
                     if (!t || t.length < 16) { reject(new Error('文本为空: ' + url)); return; }
                     resolve(t);
                 },
@@ -2522,100 +2540,129 @@
         throw lastErr || new Error('所有模型源都不可用');
     }
 
-    async function fetchModelFromOne(base, name, onProgress) {
-        // 已知模型的长度与 SHA-256（改模型文件必须同步更新这三个数）
-        const specs = {
-            'preprocess-yolo': {
-                chars: 2636,
-                bytes: 1977,
-                sha: '70e9c52222b37c5c7cc172da149da0471ce6fbdc7ace70adfa6b6c79f56ee14b'
-            },
-            best: {
-                chars: 14111256,
-                bytes: 10583440,
-                sha: 'be1b6534b6311fdcb760c789302e932779775aad70d1ce4a4c6e580033e85e4d'
-            }
-        };
-        const spec = specs[name];
-        if (!spec) throw new Error('未知模型：' + name);
-        if (!globalThis.crypto || !globalThis.crypto.subtle) {
-            throw new Error('无法校验模型，请在 HTTPS 漫画页面运行');
+    // 已知模型的长度与 SHA-256（改模型文件必须同步更新这三处）
+    const MODEL_SPECS = {
+        'preprocess-yolo': {
+            chars: 2636,
+            bytes: 1977,
+            sha: '70e9c52222b37c5c7cc172da149da0471ce6fbdc7ace70adfa6b6c79f56ee14b'
+        },
+        best: {
+            chars: 14111256,
+            bytes: 10583440,
+            sha: 'be1b6534b6311fdcb760c789302e932779775aad70d1ce4a4c6e580033e85e4d'
         }
+    };
 
-        const parts = [];
-        const chunk = 128 * 1024;
-        const url = base.replace(/\/+$/, '') + '/' + name + '.onnx.b64';
-        addLog('OCR', '小块下载并校验模型：' + name);
+    // 统一收尾：长度 → base64 字符集 → 解码字节数 → SHA-256，全过才算拿到模型
+    async function finalizeModel(b64, name, spec, via) {
+        if (b64.length !== spec.chars) {
+            throw new Error('拼接后长度不符：' + b64.length + ' / ' + spec.chars);
+        }
+        if (/[^A-Za-z0-9+/=]/.test(b64)) {
+            throw new Error('内容含非 base64 字符');
+        }
+        const buf = decodeB64ToBuffer(b64);
+        if (buf.byteLength !== spec.bytes) {
+            throw new Error('解码后长度不符：' + buf.byteLength + ' / ' + spec.bytes);
+        }
+        const digest = await globalThis.crypto.subtle.digest('SHA-256', buf);
+        const hash = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+        if (hash !== spec.sha) {
+            throw new Error('SHA-256 不符（' + hash.slice(0, 16) + '…）');
+        }
+        addLog('OCR', name + ' 校验通过：' + buf.byteLength + ' 字节' + (via ? '（' + via + '）' : ''));
+        return buf;
+    }
 
-        for (let start = 0; start < spec.chars; start += chunk) {
-            const end = Math.min(start + chunk, spec.chars) - 1;
-            const res = await new Promise((resolve, reject) => {
-                GM_xmlhttpRequest({
-                    method: 'GET', url,
-                    headers: { Range: 'bytes=' + start + '-' + end },
-                    responseType: 'text', timeout: 60000,
-                    onload: resolve,
-                    onerror: () => reject(new Error('下载失败，位置 ' + start)),
-                    ontimeout: () => reject(new Error('下载超时，位置 ' + start))
-                });
+    function gmGetRange(url, start, end) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET', url,
+                headers: { Range: 'bytes=' + start + '-' + end },
+                responseType: 'text', timeout: 60000,
+                onload: resolve,
+                onerror: () => reject(new Error('请求失败 @' + start)),
+                ontimeout: () => reject(new Error('请求超时 @' + start))
             });
+        });
+    }
 
-            const text = typeof res.responseText === 'string' ? res.responseText : res.response;
+    // 方式一：GM_xmlhttpRequest 分段（128KB/段）
+    async function fetchModelViaGM(url, name, spec, onProgress) {
+        const CHUNK = 128 * 1024;
+        const parts = [];
+        addLog('OCR', '  分段下载 ' + name + '（GM 通道）…');
 
-            // 诊断信息改到校验失败时输出（见下方 catch 分支）
+        for (let start = 0; start < spec.chars; start += CHUNK) {
+            const end = Math.min(start + CHUNK, spec.chars) - 1;
+            const res = await gmGetRange(url, start, end);
+            const status = Number(res.status);
+            const text = pickResponseText(res);
 
-            // 小模型只有一段，服务器直接返回整文件（200）也接受
-            const fullSmallFile = start === 0 && end === spec.chars - 1;
-            if (Number(res.status) !== 206 && !(fullSmallFile && Number(res.status) === 200)) {
-                throw new Error('范围请求失败：HTTP ' + res.status);
+            if (status === 206) {
+                // 正常分段：长度必须精确等于本次请求的字节数
+                if (text.length !== end - start + 1 || /[^A-Za-z0-9+/=]/.test(text)) {
+                    throw new Error('分段不完整 @' + start
+                        + '（应收 ' + (end - start + 1) + ' 实收 ' + text.length + '）');
+                }
+                parts.push(text);
+            } else if (status === 200) {
+                // 服务器忽略了 Range。只有确认拿到【完整文件】才接受，
+                // 否则会被当成一段塞进 parts，后面拼出个巨大的错误串。
+                if (text.length === spec.chars) {
+                    addLog('OCR', '  服务器忽略 Range，直接返回了完整文件，整文件校验');
+                    return await finalizeModel(text, name, spec, 'GM 整文件');
+                }
+                throw new Error('服务器返回 200 但长度不是完整文件（' + text.length + ' / ' + spec.chars + '）');
+            } else {
+                throw new Error('HTTP ' + status + ' @' + start);
             }
 
-            // 不依赖 Content-Range：每段长度和字符集自己校验
-            if (typeof text !== 'string'
-                || text.length !== end - start + 1
-                || /[^A-Za-z0-9+/=]/.test(text)) {
-                // 只在出问题时才输出诊断，平时不刷屏。
-                // 已知：iOS 的 Gear 浏览器会把响应重新编码，131072 字节变成 237290 字符；
-                // Safari + Userscripts 正常。遇到这种情况建议换 Safari。
-                try {
-                    addLog('OCR', '【诊断】HTTP ' + res.status
-                        + ' · 期望 ' + (end - start + 1)
-                        + ' 实收 ' + (typeof text === 'string' ? text.length : '非文本')
-                        + ' · responseText=' + Object.prototype.toString.call(res.responseText)
-                        + ' · response=' + Object.prototype.toString.call(res.response), 'error');
-                    if (typeof text === 'string') {
-                        addLog('OCR', '【诊断】开头 ' + JSON.stringify(text.slice(0, 80))
-                            + ' · 非Base64字符 ' + (text.match(/[^A-Za-z0-9+/=]/g) || []).length, 'error');
-                    }
-                    addLog('OCR', '【诊断】响应头 ' + JSON.stringify(res.responseHeaders).slice(0, 300), 'error');
-                    addLog('OCR', '【建议】如果你在 iOS 的 Gear 等浏览器里，请改用 Safari + Userscripts，那些浏览器的网络层会破坏二进制数据', 'warn');
-                } catch (e3) { }
-                throw new Error('模型片段不完整，位置 ' + start
-                    + '，应收 ' + (end - start + 1)
-                    + '，实收 ' + (typeof text === 'string' ? text.length : '非文本'));
-            }
-
-            parts.push(text);
             if (onProgress) onProgress(end + 1, spec.chars);
             if (parts.length % 16 === 0 || end + 1 === spec.chars) {
                 addLog('OCR', '  下载进度 ' + Math.round((end + 1) / spec.chars * 100) + '%');
             }
         }
+        return await finalizeModel(parts.join(''), name, spec, 'GM 分段');
+    }
 
-        const buf = decodeB64ToBuffer(parts.join(''));
-        if (buf.byteLength !== spec.bytes) {
-            throw new Error('模型解码后的长度错误（' + buf.byteLength + ' / ' + spec.bytes + '）');
+    // 方式二：浏览器原生 fetch（绕开脚本管理器的响应转发）
+    async function fetchModelViaFetch(url, name, spec, onProgress) {
+        if (typeof fetch !== 'function') throw new Error('浏览器不支持 fetch');
+        addLog('OCR', '  改用原生 fetch 下载 ' + name + ' …');
+        const res = await fetch(url, { cache: 'no-store', credentials: 'omit' });
+        if (!res.ok) throw new Error('fetch HTTP ' + res.status);
+        const text = await res.text();
+        if (onProgress) onProgress(spec.chars, spec.chars);
+        if (text.length !== spec.chars) {
+            throw new Error('fetch 长度不符（' + text.length + ' / ' + spec.chars + '）');
         }
+        return await finalizeModel(text, name, spec, '原生 fetch');
+    }
 
-        // 即使服务器返回错位或重复片段，也会在这里被拦住
-        const digest = await globalThis.crypto.subtle.digest('SHA-256', buf);
-        const hash = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
-        if (hash !== spec.sha) {
-            throw new Error('模型校验失败：下载内容不一致（' + hash.slice(0, 16) + '…），不要使用该缓存');
+    async function fetchModelFromOne(base, name, onProgress) {
+        const spec = MODEL_SPECS[name];
+        if (!spec) throw new Error('未知模型：' + name);
+        if (!globalThis.crypto || !globalThis.crypto.subtle) {
+            throw new Error('无法校验模型，请在 HTTPS 漫画页面运行');
         }
+        const url = base.replace(/\/+$/, '') + '/' + name + '.onnx.b64';
 
-        addLog('OCR', name + ' 校验通过：' + buf.byteLength + ' 字节');
-        return buf;
+        // 先走 GM 分段；失败再走原生 fetch（两条路径都必须过同样的校验）
+        let gmErr = null;
+        try {
+            return await fetchModelViaGM(url, name, spec, onProgress);
+        } catch (e) {
+            gmErr = e;
+            addLog('OCR', '  GM 通道失败（' + (e && e.message || e) + '），尝试原生 fetch', 'warn');
+        }
+        try {
+            return await fetchModelViaFetch(url, name, spec, onProgress);
+        } catch (e2) {
+            addLog('OCR', '  原生 fetch 也失败（' + (e2 && e2.message || e2) + '）', 'warn');
+            throw gmErr || e2;
+        }
     }
 
     // 校验拿到的字节真的是 ONNX。
@@ -2735,6 +2782,21 @@
         return out;
     }
 
+    // 校验缓存里的模型文件是否完好（大小 + SHA-256）
+    async function verifyModelBuffers(bufs) {
+        try {
+            for (const name of BUILTIN_MODELS) {
+                const spec = MODEL_SPECS[name];
+                const buf = bufs[name];
+                if (!spec || !buf || buf.byteLength !== spec.bytes) return false;
+                const digest = await globalThis.crypto.subtle.digest('SHA-256', buf);
+                const hash = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+                if (hash !== spec.sha) return false;
+            }
+            return true;
+        } catch (e) { return false; }
+    }
+
     async function ensureOrtSessions() {
         if (ortSessions.best && ortSessions['preprocess-yolo']) return ortSessions;
         await ensureOrt();
@@ -2748,15 +2810,22 @@
                 ortSessions.best = await ort.InferenceSession.create(bufs['best']);
             }
         } catch (e) {
-            // 模型文件坏了（手机上最常见：下载中断后存进 IndexedDB 的半截数据）。
-            // 清掉缓存重新下载一次，只重试这一轮，避免死循环。
+            // 失败原因可能是「文件坏了」，也可能是「WASM 没起来 / 内存不够 / 浏览器能力不足」。
+            // 只有确认文件坏了才删缓存重下 —— 否则会把一份完好的模型白白删掉。
             addLog('OCR', '模型加载失败：' + (e && e.message || e), 'warn');
-            addLog('OCR', '清除本地模型缓存，重新下载一次…', 'warn');
-            await clearBuiltinModels();
-            bufs = await ensureModelBuffers();
-            ortSessions['preprocess-yolo'] = await ort.InferenceSession.create(bufs['preprocess-yolo']);
-            ortSessions.best = await ort.InferenceSession.create(bufs['best']);
-            addLog('OCR', '重下后加载成功');
+            const filesOk = await verifyModelBuffers(bufs);
+            if (!filesOk) {
+                addLog('OCR', '模型文件校验不通过，清除缓存重新下载…', 'warn');
+                await clearBuiltinModels();
+                bufs = await ensureModelBuffers();
+                ortSessions['preprocess-yolo'] = await ort.InferenceSession.create(bufs['preprocess-yolo']);
+                ortSessions.best = await ort.InferenceSession.create(bufs['best']);
+                addLog('OCR', '重下后加载成功');
+            } else {
+                addLog('OCR', '模型文件完好（SHA-256 通过），问题在运行时', 'error');
+                throw new Error('模型文件完好，但运行时加载失败：' + (e && e.message || e)
+                    + '（可能是 WASM/内存/浏览器限制，无需重新下载）');
+            }
         }
         return ortSessions;
     }
@@ -2928,7 +2997,7 @@
             GM_xmlhttpRequest({
                 method: 'GET', url, timeout: 60000,
                 onload: r => {
-                    if (r.status >= 200 && r.status < 300 && typeof r.responseText === 'string') resolve(r.responseText);
+                    if (r.status >= 200 && r.status < 300) { const t = pickResponseText(r); if (t) resolve(t); else reject(new Error('响应为空')); }
                     else reject(new Error('HTTP ' + r.status + ' @ ' + url));
                 },
                 onerror: () => reject(new Error('拉取失败: ' + url)),
@@ -3084,10 +3153,20 @@
         if (builtinBusy) throw new Error('正在准备中');
         builtinBusy = true;
         try {
+            // 三个阶段分别报错：出问题时能一眼看出是哪一步，而不用一直改检测模型下载
             onStatus && onStatus('加载运行时 onnxruntime-web …');
-            await ensureOrt();
+            try {
+                await ensureOrt();
+            } catch (e) {
+                throw new Error('【OCR 运行时加载失败】' + (e && e.message || e));
+            }
+
             onStatus && onStatus('检查 / 下载检测模型 …');
-            await ensureOrtSessions();
+            try {
+                await ensureOrtSessions();
+            } catch (e) {
+                throw new Error('【检测模型下载/加载失败】' + (e && e.message || e));
+            }
 
             // 预热 Tesseract：建一个 worker 再销毁，逼它把语言包写进 IndexedDB
             const lang = (TESS_LANGS[apiConfig.builtinLang] || TESS_LANGS.eng).code;
@@ -3105,7 +3184,8 @@
                 try { await w.terminate(); } catch (e) { }
                 addLog('OCR', '语言包已缓存：' + lang);
             } catch (e) {
-                throw new Error('语言包准备失败：' + (e && e.message || e));
+                throw new Error('【识别语言包下载失败】' + (e && e.message || e)
+                    + '（语言包走 ' + RUNTIME_CDN.tessLang + '，与检测模型不同源）');
             }
 
             onStatus && onStatus('就绪（检测模型 + 语言包均已缓存）');
