@@ -43,7 +43,8 @@ if not exist "%PS1%" (
 rem 给脚本补上 UTF-8 BOM：否则 PowerShell 5.1 会按 GBK 读它，中文提示全乱码
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$b=[IO.File]::ReadAllBytes('%PS1%'); if ($b.Length -gt 3 -and -not ($b[0] -eq 239 -and $b[1] -eq 187 -and $b[2] -eq 191)) { $t=[IO.File]::ReadAllText('%PS1%',[Text.Encoding]::UTF8); [IO.File]::WriteAllText('%PS1%', $t, (New-Object Text.UTF8Encoding($true))) }"
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%"
+rem 把本文件的参数原样透传给 install.ps1（否则从 cmd 走不了 -Uninstall / -DryRun）
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" %*
 set "RC=%ERRORLEVEL%"
 echo.
 if not "%RC%"=="0" (

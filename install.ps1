@@ -4,10 +4,11 @@
 #
 #  用法（任选一种）：
 #    1) 双击 install.cmd（推荐，最简单）
-#    2) 管理员 PowerShell 里执行：
-#       irm https://raw.githubusercontent.com/nihao8602/86-/main/install.ps1 | iex
-#    3) 下载本文件后：
+#    2) 下载本文件后，在 PowerShell 里执行：
 #       powershell -ExecutionPolicy Bypass -File install.ps1
+#
+#  注意：不要用 `irm ... | iex` 直接管道执行。本脚本会下载并运行 Python 安装包，
+#        管道执行时你无法先看一眼内容，README 也已明令禁止这种用法。
 #
 #  卸载：
 #       powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
@@ -63,6 +64,8 @@ $Packages   = @(
 )
 $Port       = 8000
 $RuleName   = 'Manga OCR 8000'
+# 早期版本用过这些规则名，卸载时一并清掉，否则会留下「双规则 + 删不干净」
+$LegacyRuleNames = @('Local OCR 8000')
 $TotalSteps = 7
 
 # ---------- 输出助手 ----------
@@ -102,6 +105,17 @@ function Invoke-ExeLive {
         # 输出直接送控制台，不能留在函数返回值里：否则 pip 的 stdout 会和退出码混成一团
         & $Exe @ExeArgs 2>&1 | Out-Host
         return $LASTEXITCODE
+    } finally { $ErrorActionPreference = $old }
+}
+
+function Invoke-ExeExitCode {
+    # 需要「退出码 + 输出」时用这个：Invoke-ExeQuiet 只返回文本，判断不了 netsh 到底成没成功
+    param([string]$Exe, [string[]]$ExeArgs = @())
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $o = & $Exe @ExeArgs 2>&1
+        return [pscustomobject]@{ Code = $LASTEXITCODE; Out = (($o | ForEach-Object { "$_" }) -join "`n") }
     } finally { $ErrorActionPreference = $old }
 }
 
@@ -220,10 +234,46 @@ if ($Uninstall) {
         Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
         if (Test-Path $InstallDir) { Warn "目录删除不完整，请手动删除：$InstallDir" } else { Ok "已删除目录：$InstallDir" }
     } else { Ok '安装目录本来就不存在' }
+    # 防火墙规则：必须看退出码。非管理员时 netsh delete 一定失败，
+    # 旧实现用 try/catch 包住却照样打印「已删除防火墙规则」，规则实际残留。
     try {
-        $out = Invoke-ExeQuiet -Exe 'netsh' -ExeArgs @('advfirewall', 'firewall', 'delete', 'rule', "name=$RuleName")
-        Ok '已删除防火墙规则'
-    } catch { Warn '删除防火墙规则失败（可能本来就没有，或需要管理员权限）' }
+        $deleted = @()
+        $missing = @()
+        foreach ($name in (@($RuleName) + $LegacyRuleNames)) {
+            $r = Invoke-ExeExitCode -Exe 'netsh' -ExeArgs @('advfirewall', 'firewall', 'delete', 'rule', "name=$name")
+            if ($r.Code -eq 0) { $deleted += $name }
+            elseif ($r.Out -match '没有|找不到|No rules|The system cannot find') { $missing += $name }
+            else {
+                Warn "删除防火墙规则「$name」失败（exit $($r.Code)）：$($r.Out.Trim())"
+                Warn '  多半是没有管理员权限，请用管理员 PowerShell 执行：'
+                Warn "  netsh advfirewall firewall delete rule name=`"$name`""
+            }
+        }
+        if ($deleted.Count) { Ok "已删除防火墙规则：$($deleted -join '、')" }
+        if ($missing.Count) { Say "  本来就没有的规则：$($missing -join '、')" 'DarkGray' }
+    } catch { Warn "删除防火墙规则失败：$($_.Exception.Message)" }
+
+    # PATH 回滚：安装时用 PrependPath=1 把 Python312 塞进了用户 PATH，卸载要把这两段摘掉（其他条目不动）
+    try {
+        $pyDir = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312'
+        $needle = @($pyDir.TrimEnd('\'), (Join-Path $pyDir 'Scripts').TrimEnd('\'))
+        $curPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        if ($curPath) {
+            $parts = @($curPath.Split(';') | Where-Object { $_ -and $_.Trim() })
+            $keep = @($parts | Where-Object { $needle -notcontains $_.Trim().TrimEnd('\') })
+            if ($keep.Count -lt $parts.Count) {
+                [Environment]::SetEnvironmentVariable('Path', ($keep -join ';'), 'User')
+                Ok '已从用户 PATH 移除 Python 3.12 入口（其他条目保持不变）'
+            }
+        }
+    } catch { Warn "清理 PATH 失败（可手动检查系统环境变量里的 Python312 条目）：$($_.Exception.Message)" }
+
+    # 临时文件：安装时下载的 Python 安装包
+    $tmpInstaller = Join-Path $env:TEMP "python-$PyVer-amd64.exe"
+    if (Test-Path $tmpInstaller) {
+        Remove-Item $tmpInstaller -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path $tmpInstaller)) { Ok "已清理临时安装包：$tmpInstaller" }
+    }
     Say ''
     Say '  卸载完成。浏览器里 Tampermonkey 的那个脚本请自行删除。' 'Green'
     Say ''
@@ -474,7 +524,7 @@ $fwDone = $false
 if ($SkipFirewall) {
     Warn '按参数要求跳过防火墙设置（手机将无法访问电脑上的 OCR）。'
 } elseif ($DryRun) {
-    Say "    [DryRun] 添加防火墙入站规则「$RuleName」放行 TCP $Port" 'DarkGray'
+    Say "    [DryRun] 添加防火墙入站规则「$RuleName」放行 TCP $Port（仅专用/域网络）" 'DarkGray'
 } else {
     try {
         $exists = Invoke-ExeQuiet -Exe 'netsh' -ExeArgs @('advfirewall', 'firewall', 'show', 'rule', "name=$RuleName")
@@ -484,8 +534,14 @@ if ($SkipFirewall) {
         }
     } catch { }
     if (-not $fwDone) {
+        # 先清掉早期版本留下的旧规则名，避免「双规则并存 + 卸载漏删」
+        foreach ($legacy in $LegacyRuleNames) {
+            $r0 = Invoke-ExeExitCode -Exe 'netsh' -ExeArgs @('advfirewall', 'firewall', 'delete', 'rule', "name=$legacy")
+            if ($r0.Code -eq 0) { Ok "已清理旧防火墙规则：$legacy" }
+        }
+        # 只放行「专用 / 域」网络：公用网络（咖啡店、机场 WiFi）不自动开放端口
         $fwArgs = @('advfirewall', 'firewall', 'add', 'rule', "name=$RuleName",
-            'dir=in', 'action=allow', 'protocol=TCP', "localport=$Port")
+            'dir=in', 'action=allow', 'protocol=TCP', "localport=$Port", 'profile=private,domain')
         try {
             if (Test-Admin) {
                 $rc = Invoke-ExeLive -Exe 'netsh' -ExeArgs $fwArgs
@@ -499,7 +555,7 @@ if ($SkipFirewall) {
         if (-not $fwDone) {
             Warn "没能自动放行 $Port（你拒绝了 UAC 或权限不足）。"
             Warn '只影响手机访问；电脑上照常使用。需要时用管理员 PowerShell 执行：'
-            Warn "  netsh advfirewall firewall add rule name=`"$RuleName`" dir=in action=allow protocol=TCP localport=$Port"
+            Warn "  netsh advfirewall firewall add rule name=`"$RuleName`" dir=in action=allow protocol=TCP localport=$Port profile=private,domain"
         }
     }
 }

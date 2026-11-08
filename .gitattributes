@@ -5,3 +5,12 @@
 *.ps1 -text
 # bash 脚本必须 LF（且不能带 BOM，否则 shebang 失效），同样按原样存储
 *.sh -text
+# 主脚本固定 LF：否则 Windows 上 clone 会变成 CRLF，和本地版本的逐字节哈希对不上，
+# 手册里「用哈希校验本地与仓库是否同步」的办法会永远失败（内容相同、行尾不同）
+*.js text eol=lf
+# 文档也用 LF，避免 diff 里出现整文件换行噪声
+*.md text eol=lf
+# Python 和 git 自己的配置文件同样锁 LF：Windows 上 core.autocrlf=true 会把它们转成 CRLF，
+# 让「本地与仓库逐字节一致」的校验（哈希比对）再次失效
+*.py text eol=lf
+.gitattributes text eol=lf
